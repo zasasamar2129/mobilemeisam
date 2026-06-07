@@ -35,7 +35,7 @@ import {
   Moon
 } from 'lucide-react';
 
-const API = import.meta.env.VITE_API_URL;
+const API = import.meta.env.VITE_API_URL || 'https://mobilemeisam.onrender.com';
 
 export default function App() {
   // Locale State - Persian default
