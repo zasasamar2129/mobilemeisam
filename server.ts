@@ -102,7 +102,7 @@ app.post('/api/auth/login', (req, res) => {
   const { username, password } = req.body;
   
   // Default Admin Credentials
-  if ((username === 'admin' || username === 'meisam') && password === 'meisam123') {
+  if ((username === 'admin' || username === 'meisam') && password === 'meisam9039') {
     const token = signToken({ username: 'admin', role: 'admin' });
     return res.json({
       success: true,
