@@ -868,9 +868,7 @@ export default function App() {
             </form>
 
             <div className="text-center">
-              <span className="text-[10px] text-gray-400 font-mono italic">
-                {lang === 'fa' ? 'نام پیش‌فرض: admin | کلمه عبور: meisam123' : 'Default user: admin | pass: meisam123'}
-              </span>
+              
             </div>
 
           </div>
