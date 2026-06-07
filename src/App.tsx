@@ -35,6 +35,8 @@ import {
   Moon
 } from 'lucide-react';
 
+const API = import.meta.env.VITE_API_URL || 'https://mobilemeisam.onrender.com';
+
 export default function App() {
   // Locale State - Persian default
   const [lang, setLang] = useState<'fa' | 'en'>(() => {
@@ -104,7 +106,7 @@ export default function App() {
     const bootAuth = async () => {
       if (adminToken) {
         try {
-          const res = await fetch('/api/auth/me', {
+          const res = await fetch(`${API}/api/auth/me`, {
             headers: { 'Authorization': `Bearer ${adminToken}` }
           });
           if (res.ok) {
@@ -132,10 +134,10 @@ export default function App() {
       const headers = { 'Authorization': `Bearer ${adminToken}` };
       
       const [statsRes, custRes, contrRes, notifRes] = await Promise.all([
-        fetch('/api/stats', { headers }),
-        fetch('/api/customers', { headers }),
-        fetch('/api/contracts', { headers }),
-        fetch('/api/notifications', { headers })
+        fetch(`${API}/api/stats`, { headers }),
+        fetch(`${API}/api/customers`, { headers }),
+        fetch(`${API}/api/contracts`, { headers }),
+        fetch(`${API}/api/notifications`, { headers })
       ]);
 
       if (statsRes.ok && custRes.ok && contrRes.ok && notifRes.ok) {
@@ -159,7 +161,7 @@ export default function App() {
     setLoginLoading(true);
 
     try {
-      const res = await fetch('/api/auth/login', {
+      const res = await fetch(`${API}/api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password })
@@ -215,7 +217,7 @@ export default function App() {
     setFoundContracts([]);
 
     try {
-      const res = await fetch(`/api/customer/search?phone=${encodeURIComponent(sanitizedVal)}`);
+      const res = await fetch(`${API}/api/customer/search?phone=${encodeURIComponent(sanitizedVal)}`);
       if (res.ok) {
         const data = await res.json();
         setFoundContracts(data);
@@ -234,7 +236,7 @@ export default function App() {
   // --- ADMIN ACTIONS PASS-THROUGH ---
 
   const handleAddCustomer = async (fullName: string, phoneNumber: string) => {
-    const res = await fetch('/api/customers', {
+    const res = await fetch(`${API}/api/customers`, {
       method: 'POST',
       headers: { 
         'Content-Type': 'application/json',
@@ -253,7 +255,7 @@ export default function App() {
   };
 
   const handleEditCustomer = async (id: string, fullName: string, phoneNumber: string) => {
-    const res = await fetch(`/api/customers/${id}`, {
+    const res = await fetch(`${API}/api/customers/${id}`, {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
@@ -272,7 +274,7 @@ export default function App() {
   };
 
   const handleAddContract = async (data: any) => {
-    const res = await fetch('/api/contracts', {
+    const res = await fetch(`${API}/api/contracts`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -291,7 +293,7 @@ export default function App() {
   };
 
   const handleDeleteContract = async (id: string) => {
-    const res = await fetch(`/api/contracts/${id}`, {
+    const res = await fetch(`${API}/api/contracts/${id}`, {
       method: 'DELETE',
       headers: { 'Authorization': `Bearer ${adminToken}` }
     });
@@ -306,7 +308,7 @@ export default function App() {
   };
 
   const handleRecordPayment = async (payData: any) => {
-    const res = await fetch('/api/payments', {
+    const res = await fetch(`${API}/api/payments`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -325,7 +327,7 @@ export default function App() {
   };
 
   const handleMarkNotificationRead = async (id: string) => {
-    const res = await fetch(`/api/notifications/${id}/read`, {
+    const res = await fetch(`${API}/api/notifications/${id}/read`, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${adminToken}` }
     });
@@ -335,7 +337,7 @@ export default function App() {
   };
 
   const handleDownloadReport = (type: 'customers' | 'contracts' | 'payments', format: 'csv' | 'excel') => {
-    const url = `/api/reports/export?type=${type}&format=${format}&Authorization=Bearer ${adminToken}`;
+    const url = `${API}/api/reports/export?type=${type}&format=${format}&Authorization=Bearer ${adminToken}`;
     window.open(url, '_blank');
   };
 
