@@ -2,7 +2,7 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
-
+import cors from 'cors';
 import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
@@ -26,6 +26,16 @@ import {
 dotenv.config();
 
 const app = express();
+app.use(cors({
+  origin: [
+    "https://mobilemeisam.vercel.app"
+  ],
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+}));
+
+app.options("*", cors());
+
 const PORT = 3000;
 
 // Initialize the persistent DB file
