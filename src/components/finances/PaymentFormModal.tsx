@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Modal } from '../ui/Modal';
 import { Payment, PaymentType, Customer, Attachment } from '../../types';
+import { useCustomerCreationHandoff, CUSTOMER_CREATE_VALUE, customerCreateOption } from '../customers/useCustomerCreationHandoff';
 import { Input } from '../ui/Input';
 import { Textarea } from '../ui/Textarea';
 import { Select } from '../ui/Select';
@@ -40,6 +41,9 @@ export const PaymentFormModal: React.FC<PaymentFormModalProps> = ({
   const [referenceNumber, setReferenceNumber] = useState('');
   const [description, setDescription] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  // "Create customer" handoff — this form stays mounted underneath the customer
+  // modal, so every field the user already entered survives the round-trip.
+  const customerHandoff = useCustomerCreationHandoff();
 
   useEffect(() => {
     if (initialPayment) {
@@ -74,7 +78,7 @@ export const PaymentFormModal: React.FC<PaymentFormModalProps> = ({
       setDescription('');
       setAttachments([]);
     }
-  }, [initialCustomer, initialPayment, allCustomers, isOpen]);
+  }, [initialCustomer, initialPayment, isOpen]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -132,6 +136,7 @@ export const PaymentFormModal: React.FC<PaymentFormModalProps> = ({
   const currentSelectedCustomer = allCustomers.find((c) => c.id === customerId);
 
   return (
+    <>
     <Modal
       isOpen={isOpen}
       onClose={onClose}
@@ -156,12 +161,21 @@ export const PaymentFormModal: React.FC<PaymentFormModalProps> = ({
         <Select
           label={t('payments.customer')}
           value={customerId}
-          onChange={(e) => setCustomerId(e.target.value)}
+          onChange={(e) => {
+            if (e.target.value === CUSTOMER_CREATE_VALUE) {
+              customerHandoff.open((c) => setCustomerId(c.id));
+            } else {
+              setCustomerId(e.target.value);
+            }
+          }}
           isRequired
-          options={(allCustomers || []).map((c) => ({
-            value: c.id,
-            label: `${c.name} (${c.mobile})${c.companyName ? ` - ${c.companyName}` : ''}`,
-          }))}
+          options={[
+            customerCreateOption(),
+            ...(allCustomers || []).map((c) => ({
+              value: c.id,
+              label: `${c.name} (${c.mobile})${c.companyName ? ` - ${c.companyName}` : ''}`,
+            })),
+          ]}
         />
 
         <div className="space-y-1">
@@ -243,6 +257,8 @@ export const PaymentFormModal: React.FC<PaymentFormModalProps> = ({
         </div>
       </form>
     </Modal>
+      {customerHandoff.modal}
+    </>
   );
 };
 

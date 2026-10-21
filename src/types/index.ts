@@ -157,6 +157,9 @@ export enum SimStatus {
   SUSPENDED = 'SUSPENDED',
   DECOMMISSIONED = 'DECOMMISSIONED',
   PENDING_INSPECTION = 'PENDING_INSPECTION',
+  RETURNED = 'RETURNED',
+  EXPIRED = 'EXPIRED',
+  CONSIGNMENT = 'CONSIGNMENT',
 }
 
 export enum SimType {
@@ -171,6 +174,22 @@ export enum SimOperator {
   RIGHTEL = 'RIGHTEL', // رایتل
   SHATEL_MOBILE = 'SHATEL_MOBILE', // شاتل موبایل
   OTHER = 'OTHER',
+}
+
+export enum WebsiteListingStatus {
+  NOT_PUBLISHED = 'NOT_PUBLISHED',
+  PUBLISHED = 'PUBLISHED',
+  WITHDRAWN = 'WITHDRAWN',
+  SOLD = 'SOLD',
+}
+
+export enum WebsiteSyncStatus {
+  NOT_QUEUED = 'NOT_QUEUED',
+  PENDING = 'PENDING',
+  SYNCING = 'SYNCING',
+  SYNCED = 'SYNCED',
+  RETRY_PENDING = 'RETRY_PENDING',
+  FAILED = 'FAILED',
 }
 
 // ------------------------------------------------------------------
@@ -300,6 +319,11 @@ export interface User {
   createdAt: string;
   updatedAt?: string;
   lastLoginAt?: string;
+  /** Presence — refreshed by the 3.5s sync ping; stale by up to one poll interval. */
+  is_online?: boolean;
+  isOnline?: boolean;
+  last_seen_at?: string;
+  lastSeenAt?: string;
 }
 
 export enum CustomerType {
@@ -394,6 +418,9 @@ export interface Lead {
   status: LeadStatus | string;
   source?: string;
   notes?: string;
+  registrationDate?: string; // P1: Leads initial registration date
+  createdById?: string;
+  createdByUserName?: string;
   assignedUserId?: string;
   assignedUserName?: string;
   convertedCustomerId?: string;
@@ -562,6 +589,7 @@ export interface Contract {
   firstDueDate?: string;
   scheduleRule?: 'MONTHLY' | 'BIMONTHLY' | string;
   financialSnapshot?: ContractFinancialSnapshot;
+  installments?: ContractInstallment[];
   createdAt: string;
   updatedAt?: string;
 }
@@ -665,6 +693,24 @@ export interface SimCard {
   registeredHolderId?: string;
   registeredHolderName?: string;
   ownershipRegistrationDate?: string;
+  /**
+   * The RELEVANT PREVIOUS ownership-transfer date. The 20-day waiting period is
+   * measured from here — never from `purchaseDate`, which is a different fact.
+   * Absent means "unknown": such records are flagged for verification and are
+   * never reminded on, rather than silently measured from a substitute date.
+   */
+  previousTransferDate?: string;
+  /**
+   * The operator's hand-chosen follow-up date. Never calculated, never derived
+   * from the purchase date or the waiting-period rule. `null` means "clear it",
+   * which is distinct from omitting the field (leave it as stored).
+   */
+  deedTransferDueDate?: string | null;
+  deedTransferCompletedAt?: string; // Actual deed-transfer completion timestamp
+  deedTransferOverride?: boolean; // Authorized exception (early completion / long deadline)
+  deedTransferOverrideReason?: string; // Mandatory reason when the override is used
+  deedTransferOverrideByUserId?: string; // Who authorized the exception — the audit trail
+  deedTransferOverrideAt?: string; // When the exception was authorized
   // Purchase / خرید سیم‌کارت
   purchaseDate?: string;
   purchasePrice?: number;
@@ -741,6 +787,19 @@ export interface SimCard {
   consignmentId?: string;
   isConsigned?: boolean;
   consignmentStatus?: 'CONSIGNMENT' | 'SOLD' | 'RETURNED' | 'EXPIRED' | string;
+  ownershipSource?: 'OWN' | 'CONSIGNMENT' | 'THIRD_PARTY';
+
+  // Website publication & sync metadata
+  websitePublicId?: string;
+  websitePublishRequested?: boolean;
+  websiteListingStatus?: WebsiteListingStatus | string;
+  websiteSyncStatus?: WebsiteSyncStatus | string;
+  websiteSyncVersion?: number;
+  websiteLastSyncAt?: string;
+  websiteLastAttemptAt?: string;
+  websiteLastErrorCode?: string;
+  websiteUpdatedAt?: string;
+
   createdAt: string;
   updatedAt?: string;
 }
@@ -758,6 +817,19 @@ export interface SimPurchase {
   purchasePrice: number;
   currency?: string;
   paymentStatus: SimPurchaseStatus;
+  /**
+   * Captured at purchase time: when the SIM's PREVIOUS ownership transfer
+   * happened. This — not `purchaseDate` — is the base of the 20-day waiting
+   * period. Left empty when the seller could not confirm it, which flags the
+   * SIM for verification instead of guessing.
+   */
+  previousTransferDate?: string;
+  /**
+   * The operator's hand-chosen follow-up date, captured at purchase time so a
+   * new SIM can be given a due date without a second visit to its record. It is
+   * stored verbatim and is never derived from the purchase date.
+   */
+  deedTransferDueDate?: string;
   sourceType?: 'CUSTOMER' | 'INTERNAL';
   notes?: string;
   createdByUserId?: string;
@@ -918,6 +990,10 @@ export interface Consignment {
   soldPrice?: number;
   actualCommission?: number;
   ownerPayableAmount?: number;
+  /** Sale proceeds received FROM the buyer (distinct from owner settlement). */
+  saleReceivedAmount?: number;
+  salePaymentStatus?: 'PENDING' | 'PARTIAL' | 'SETTLED';
+  /** Payout status to the consignment owner. */
   settlementStatus?: 'PENDING' | 'PARTIAL' | 'SETTLED';
   settledAt?: string;
   buyerCustomerId?: string;
@@ -927,6 +1003,22 @@ export interface Consignment {
   notes?: string;
   contactHistory?: ConsignmentContact[];
   documents?: string[];
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface ConsignmentPayment {
+  id: string;
+  consignmentId: string;
+  simId: string;
+  amount: number;
+  paymentDate?: string;
+  method: SimPaymentMethod;
+  referenceNumber?: string;
+  bankName?: string;
+  note?: string;
+  createdByUserId?: string;
+  createdByUserName?: string;
   createdAt: string;
   updatedAt?: string;
 }
@@ -1323,6 +1415,9 @@ export interface BackupRecordCounts {
   sims: number;
   repairs: number;
   registeredHolders?: number;
+  holderIdCards?: number;
+  checkPhotos?: number;
+  contractSignatures?: number;
   attachments: number;
   accounts?: number;
   journalEntries?: number;
@@ -1565,6 +1660,8 @@ export enum MessageStatus {
 export enum ChatMemberRole {
   MEMBER = 'MEMBER',
   MANAGER = 'MANAGER', // رزرو شده برای آینده
+  ADMIN = 'ADMIN',
+  OWNER = 'OWNER',
 }
 
 export interface ConversationMember {
@@ -1577,6 +1674,12 @@ export interface ConversationMember {
   joinedAt?: string; // alias
   last_read_at?: string;
   lastReadAt?: string; // alias
+  left_at?: string;
+  leftAt?: string;
+  is_typing?: boolean;
+  isTyping?: boolean;
+  typing_at?: string;
+  typingAt?: string;
 }
 
 export interface ChatConversation {
@@ -1587,6 +1690,8 @@ export interface ChatConversation {
   member_ids: string[];
   created_by: string;
   createdById?: string;
+  created_by_user_id?: string;
+  createdByUserId?: string;
   created_by_name: string;
   createdByName?: string;
   created_at: string;
@@ -1601,12 +1706,16 @@ export interface ChatConversation {
   lastMessageUserName?: string;
   is_archived_by?: string[];
   isArchivedBy?: string[];
+  archived_at?: string;
+  archivedAt?: string;
   updated_at?: string;
   updatedAt?: string;
   // Stage 1: Priority & Pin
   priority?: ConversationPriority | string;
   is_pinned?: boolean;
   pinnedByUserId?: string;
+  pinned_by_user_ids?: string[];
+  pinnedByUserIds?: string[];
   pinned_at?: string;
   message_count?: number;
   // Stage 2: Group fields
@@ -1616,14 +1725,20 @@ export interface ChatConversation {
 }
 
 export interface MessageAttachmentRef {
-  attachment_id: string;
+  attachment_id?: string;
   attachmentId?: string; // alias
-  attachment_name: string;
+  attachment_name?: string;
   attachmentName?: string; // alias
   attachment_file_size?: number;
   attachmentFileSize?: number;
   attachment_file_type?: string;
   attachmentFileType?: string;
+  document_id?: string;
+  documentId?: string;
+  data_url?: string;
+  dataUrl?: string;
+  thumbnail_data_url?: string;
+  thumbnailDataUrl?: string;
 }
 
 // Stage 2: MessageAttachment - document_id reference to Document Engine
@@ -1651,6 +1766,17 @@ export interface MessageAttachment {
 }
 
 // Stage 1: ChatMessage extension with deletion fields
+export interface ChatMessageReaction {
+  emoji: string;
+  user_id: string;
+  userId?: string; // alias
+  user_name: string;
+  userName?: string; // alias
+  created_at?: string;
+  createdAt?: string;
+}
+
+// Stage 1: ChatMessage extension with deletion fields and reactions
 export interface ChatMessage {
   id: string;
   conversation_id: string;
@@ -1662,6 +1788,8 @@ export interface ChatMessage {
   body?: string;
   body_text?: string;
   attachments?: MessageAttachmentRef[];
+  message_attachments?: (MessageAttachmentRef | MessageAttachment)[];
+  reactions?: ChatMessageReaction[];
   status: MessageStatus | string;
   read_at?: string;
   readAt?: string;
@@ -1678,9 +1806,28 @@ export interface ChatMessage {
   deletedAt?: string;
   deleted_by_user_id?: string;
   deletedByUserId?: string;
+  deleted_by_user_name?: string;
+  deletedByUserName?: string;
+  deletion_reason?: string;
+  is_deleted?: boolean;
+  isDeleted?: boolean;
   is_edited?: boolean;
+  isEdited?: boolean;
   edited_at?: string;
   editedAt?: string;
+  // Sprint 04 Chat Additions: Voice & Reply
+  message_type?: 'text' | 'voice' | 'file' | 'image' | string;
+  voice_duration?: number;
+  voice_data_url?: string;
+  reply_to_message_id?: string;
+  replyToMessageId?: string;
+  reply_to_message?: {
+    id: string;
+    sender_user_name: string;
+    body?: string;
+    is_deleted?: boolean;
+    message_type?: string;
+  };
 }
 
 // Stage 3: Broadcast
@@ -1695,6 +1842,11 @@ export interface Broadcast {
   id: string;
   sender_user_id: string;
   senderUserId?: string;
+  sender_user_name?: string;
+  senderUserName?: string;
+  title?: string;
+  target_type?: string;
+  targetType?: string;
   body: string;
   created_at: string;
   createdAt?: string;
@@ -1702,6 +1854,8 @@ export interface Broadcast {
   recipient_count?: number;
   read_count?: number;
   sent_count?: number;
+  delivered_count?: number;
+  deliveredCount?: number;
   failed_count?: number;
 }
 
@@ -1864,6 +2018,7 @@ export interface ContractInstallment {
   bankName?: string;
   destinationAccount?: string;
   payments?: Payment[];
+  financeReviewStatus?: FinanceReviewStatus | string;
   createdAt: string;
   updatedAt?: string;
 }

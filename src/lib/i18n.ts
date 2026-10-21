@@ -40,6 +40,8 @@ export const faTranslations: Translations = {
   "nav.audit": "گزارش فعالیت",
   "nav.settings": "تنظیمات",
   "nav.backups": "پشتیبان‌گیری",
+  "nav.wordpress-sync": "همگام‌سازی وردپرس",
+  "nav.wordpress-catalogue": "کاتالوگ وردپرس",
   "nav.desc.dashboard": "خلاصه وضعیت، آمار کلیدی و هشدارهای سیستم",
   "nav.desc.customers": "فهرست و پرونده جامع مشتریان",
   "nav.desc.leads": "پیگیری لیدها، شماره‌های ناشناس و تبدیل به مشتری",
@@ -60,6 +62,7 @@ export const faTranslations: Translations = {
   "nav.desc.audit": "ردپای امنیتی و تغییرات سامانه",
   "nav.desc.settings": "پیکربندی هوش مصنوعی و ترجیحات",
   "nav.desc.backups": "پشتیبان‌گیری جامع، بازیابی و زمان‌بندی",
+  "nav.desc.wordpress-sync": "اتصال و همگام‌سازی سیم‌کارت‌ها با وب‌سایت اول سیم",
 
   // Header & Global Shell
   "header.tagline": "سامانه یکپارچه مدیریت ارتباط با مشتریان و هوش تجاری",
@@ -844,6 +847,8 @@ export const enTranslations: Translations = {
   "nav.audit": "Activity Log",
   "nav.settings": "Settings",
   "nav.backups": "Backups",
+  "nav.wordpress-sync": "WordPress Sync",
+  "nav.wordpress-catalogue": "WordPress Catalog",
   "nav.desc.dashboard": "Overview summary, key metrics and system alerts",
   "nav.desc.customers": "Comprehensive customer directory and 360 profile",
   "nav.desc.leads": "Lead pipeline, anonymous caller log, and conversion",
@@ -864,6 +869,7 @@ export const enTranslations: Translations = {
   "nav.desc.audit": "Security trails, logins and data mutation logs",
   "nav.desc.settings": "AI configurations, keys and system preferences",
   "nav.desc.backups": "Comprehensive data backups, schedule and restore",
+  "nav.desc.wordpress-sync": "Connect and publish SIM listings to the AVALSIM website",
   "common.search": "Search...",
   "common.filter": "Filters",
   "common.all": "All",

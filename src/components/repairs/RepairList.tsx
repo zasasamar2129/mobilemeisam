@@ -20,11 +20,13 @@ import { AttachmentPreview } from '../attachments/AttachmentPreview';
 export interface RepairListProps {
   repairs: RepairTicket[];
   customers: Customer[];
-  users: User[];
+  users?: User[];
+  allUsers?: User[];
+  currentUser?: User;
   onAddNewRepair: () => void;
   onEditRepair: (repair: RepairTicket) => void;
   onRefreshRepairs: () => void;
-  onSelectCustomer: (customerId: string) => void;
+  onSelectCustomer?: (customerId: string) => void;
 }
 
 export const RepairList: React.FC<RepairListProps> = ({
@@ -67,7 +69,7 @@ export const RepairList: React.FC<RepairListProps> = ({
     }
   };
 
-  const getStatusBadge = (status: RepairStatus) => {
+  const getStatusBadge = (status: RepairStatus | string) => {
     switch (status) {
       case RepairStatus.READY_DELIVERY:
         return <Badge variant="emerald" size="sm">{t('repairs.statusReady')}</Badge>;

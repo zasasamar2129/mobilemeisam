@@ -8,6 +8,7 @@ import { Button } from '../ui/Button';
 import { useToast } from '../ui/Toast';
 import { storage } from '../../services/storage';
 import { UserCheck, Sparkles, Building2, Phone, User, Check, ArrowRight } from 'lucide-react';
+import { cleanDigits } from '../../lib/numberUtils';
 
 export interface LeadConvertModalProps {
   isOpen: boolean;
@@ -135,7 +136,7 @@ export const LeadConvertModal: React.FC<LeadConvertModalProps> = ({
           <Input
             label="شماره موبایل اصلی *"
             value={mobile}
-            onChange={(e) => setMobile(e.target.value)}
+            onChange={(e) => setMobile(cleanDigits(e.target.value))}
             placeholder="0912xxxxxxx"
             isRequired
             dir="ltr"
@@ -144,7 +145,7 @@ export const LeadConvertModal: React.FC<LeadConvertModalProps> = ({
           <Input
             label="تلفن ثابت (اختیاری)"
             value={phone}
-            onChange={(e) => setPhone(e.target.value)}
+            onChange={(e) => setPhone(cleanDigits(e.target.value))}
             placeholder="021xxxxxxxx"
             dir="ltr"
           />

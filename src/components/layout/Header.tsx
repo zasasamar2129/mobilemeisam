@@ -9,6 +9,7 @@ import { storage } from '../../services/storage';
 import { useTranslation } from '../../lib/i18n';
 import { hasPermission } from '../../lib/permissions';
 import { ModuleName, PermissionAction } from '../../types';
+import { NotificationBell } from './NotificationBell';
 
 export interface HeaderProps {
   currentUser: User;
@@ -24,6 +25,8 @@ export interface HeaderProps {
   onNavigate: (tab: string) => void;
   onToggleMobileNav?: () => void;
   onOpenProfile?: () => void;
+  /** Open a SIM record from a deed-transfer notification. */
+  onOpenSim?: (simId: string) => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -40,6 +43,7 @@ export const Header: React.FC<HeaderProps> = ({
   onNavigate,
   onToggleMobileNav,
   onOpenProfile,
+  onOpenSim,
 }) => {
   const { language, setLanguage, toggleLanguage, t, isRtl } = useTranslation();
   const canCreateCustomer = hasPermission(currentUser, ModuleName.CUSTOMERS, PermissionAction.CREATE);
@@ -79,7 +83,7 @@ export const Header: React.FC<HeaderProps> = ({
   };
 
   return (
-    <header className="sticky top-0 z-30 w-full bg-surface/95 border-b border-primary/80 backdrop-blur-xl px-3 sm:px-4 lg:px-6 py-2 sm:py-2.5 flex items-center justify-between gap-3 select-none transition-colors">
+    <header className="sticky top-0 z-30 w-full bg-surface/95 border-b border-primary/80 backdrop-blur-xl pt-[max(0.5rem,env(safe-area-inset-top))] sm:pt-[max(0.625rem,env(safe-area-inset-top))] pb-2 sm:pb-2.5 ps-[max(0.75rem,env(safe-area-inset-right))] pe-[max(0.75rem,env(safe-area-inset-left))] sm:ps-[max(1rem,env(safe-area-inset-right))] sm:pe-[max(1rem,env(safe-area-inset-left))] lg:ps-[max(1.5rem,env(safe-area-inset-right))] lg:pe-[max(1.5rem,env(safe-area-inset-left))] flex items-center justify-between gap-3 select-none transition-colors">
       {/* Brand & Mobile Hamburger */}
       <div className="flex items-center gap-2 sm:gap-3 min-w-0">
         {onToggleMobileNav && (
@@ -162,6 +166,9 @@ export const Header: React.FC<HeaderProps> = ({
           </span>
           <RefreshCw className={`w-3 h-3 text-muted dark:text-muted transition-transform ${isSyncingSpin || syncStatus.isSyncing ? 'animate-spin text-primary' : ''}`} />
         </button>
+
+        {/* In-app notifications (bell + opt-in sound) */}
+        <NotificationBell currentUser={currentUser} onNavigate={onNavigate} onOpenSim={onOpenSim} />
 
         {/* Theme Toggle Button */}
         <button

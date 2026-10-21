@@ -19,6 +19,11 @@ import {
 } from 'lucide-react';
 import { formatPersianDate } from '../../lib/dateUtils';
 import { motion, AnimatePresence } from 'motion/react';
+import {
+  useCustomerCreationHandoff,
+  customerCreateOption,
+  CUSTOMER_CREATE_VALUE,
+} from '../customers/useCustomerCreationHandoff';
 
 export interface TaskFormModalProps {
   isOpen: boolean;
@@ -40,6 +45,7 @@ export const TaskFormModal: React.FC<TaskFormModalProps> = ({
   onSaved,
 }) => {
   const { success, error } = useToast();
+  const customerHandoff = useCustomerCreationHandoff();
 
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
@@ -141,8 +147,8 @@ export const TaskFormModal: React.FC<TaskFormModalProps> = ({
         setCustomerId(taskToEdit.customerId || '');
         setAssignedUserId(taskToEdit.assignedUserId || '');
         setSharedWithUserIds(taskToEdit.sharedWithUserIds || []);
-        setPriority(taskToEdit.priority || TaskPriority.MEDIUM);
-        setStatus(taskToEdit.status || TaskStatus.PENDING);
+        setPriority((taskToEdit.priority || TaskPriority.MEDIUM) as TaskPriority);
+        setStatus((taskToEdit.status || TaskStatus.PENDING) as TaskStatus);
         setDueDate(taskToEdit.dueDate ? taskToEdit.dueDate.substring(0, 16) : '');
         setVoiceNoteAudioUrl(taskToEdit.voiceNoteAudioUrl || null);
         setVoiceNoteDuration(taskToEdit.voiceNoteDuration || 0);
@@ -236,8 +242,8 @@ export const TaskFormModal: React.FC<TaskFormModalProps> = ({
       setCustomerId(taskToEdit.customerId || '');
       setAssignedUserId(taskToEdit.assignedUserId || '');
       setSharedWithUserIds(taskToEdit.sharedWithUserIds || []);
-      setPriority(taskToEdit.priority || TaskPriority.MEDIUM);
-      setStatus(taskToEdit.status || TaskStatus.PENDING);
+      setPriority((taskToEdit.priority || TaskPriority.MEDIUM) as TaskPriority);
+      setStatus((taskToEdit.status || TaskStatus.PENDING) as TaskStatus);
       setDueDate(taskToEdit.dueDate ? taskToEdit.dueDate.substring(0, 16) : '');
       setVoiceNoteAudioUrl(taskToEdit.voiceNoteAudioUrl || null);
       setVoiceNoteDuration(taskToEdit.voiceNoteDuration || 0);
@@ -427,6 +433,7 @@ export const TaskFormModal: React.FC<TaskFormModalProps> = ({
   const otherUsersForSharing = (allUsers || []).filter((u) => u.id !== assignedUserId);
 
   return (
+    <>
     <Modal
       isOpen={isOpen}
       onClose={onClose}
@@ -468,13 +475,21 @@ export const TaskFormModal: React.FC<TaskFormModalProps> = ({
           <Select
             label="مشتری مرتبط (اختیاری)"
             value={customerId}
-            onChange={(e) => setCustomerId(e.target.value)}
+            onChange={(e) => {
+              if (e.target.value === CUSTOMER_CREATE_VALUE) {
+                // Keep the draft; select the new customer when it is saved.
+                customerHandoff.open((c) => setCustomerId(c.id));
+                return;
+              }
+              setCustomerId(e.target.value);
+            }}
             options={[
               { value: '', label: 'بدون مشتری / کار داخلی سازمانی' },
               ...(allCustomers || []).map((c) => ({
                 value: c.id,
                 label: `${c.name} (${c.mobile})`,
               })),
+              customerCreateOption(),
             ]}
           />
 
@@ -896,6 +911,8 @@ export const TaskFormModal: React.FC<TaskFormModalProps> = ({
         </div>
       </form>
     </Modal>
+    {customerHandoff.modal}
+    </>
   );
 };
 

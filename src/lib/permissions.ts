@@ -356,6 +356,24 @@ export function isAdmin(user: User | null | undefined): boolean {
   );
 }
 
+/**
+ * WordPress Sync setup is restricted to the two privileged roles named in the
+ * product spec: GOD (unlimited) and SUPER_ADMIN (admin). OWNER is deliberately
+ * excluded here even though `isAdmin` covers it — sync configuration is a
+ * platform-management action, not an executive one.
+ */
+export function isGodOrAdmin(user: User | null | undefined): boolean {
+  if (!user) return false;
+  const roleStr = String(user.role || '').trim().toUpperCase();
+  return roleStr === 'GOD' || roleStr === 'SUPER_ADMIN' || user.role === UserRole.GOD || user.role === UserRole.SUPER_ADMIN;
+}
+
+export function canViewAllTasks(user: User | null | undefined): boolean {
+  if (!user) return false;
+  if (isAdmin(user)) return true;
+  return user.role === UserRole.SUPERVISOR;
+}
+
 export function hasPermission(
   user: User | null | undefined,
   module: ModuleName,
@@ -455,6 +473,7 @@ export function canPerformSimFinancialAction(user: User | null, key: string): bo
 export function canViewTask(user: User | null | undefined, task: Task): boolean {
   if (!user) return false;
   if (isAdmin(user)) return true;
+  if (user.role === UserRole.SUPERVISOR) return true;
   if (task.creatorUserId && task.creatorUserId === user.id) return true;
   if (task.assignedUserId && task.assignedUserId === user.id) return true;
   if (task.sharedWithUserIds && task.sharedWithUserIds.includes(user.id)) return true;

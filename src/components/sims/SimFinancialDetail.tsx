@@ -10,6 +10,14 @@ import { StatusBadge, STATUS_TONES } from '../ui/StatusBadge';
 import { Tooltip } from '../ui/Tooltip';
 import { Skeleton } from '../ui/Skeleton';
 import { useTranslation } from '../../lib/i18n';
+import { formatPersianDate, isOverdue } from '../../lib/dateUtils';
+import {
+  computeDeedTransferEligibility,
+  computeDeedFollowStatus,
+  deedFollowStatusLabelFa,
+  deedEligibilityStatusLabelFa,
+  deedRemainingLabelFa,
+} from '../../lib/deedTransfer';
 import { canViewSimProfit, canPerformSimFinancialAction, PERMISSION_KEYS } from '../../lib/permissions';
 import {
   ShoppingCart, CreditCard, Wallet, ArrowDownToLine, ArrowUpFromLine,
@@ -57,6 +65,13 @@ export const SimFinancialDetail: React.FC<SimFinancialDetailProps> = ({ sim, isO
       return null;
     }
   }, [sim.id, refreshKey]);
+
+  /**
+   * Derived eligibility — the same pure function the API, the scheduler and the
+   * list column use, so the drawer can never contradict them.
+   */
+  const deedEligibility = useMemo(() => computeDeedTransferEligibility(sim), [sim]);
+  const deedFollow = useMemo(() => computeDeedFollowStatus(sim), [sim]);
 
   const timelineItems = useMemo(() => {
     try {
@@ -129,6 +144,96 @@ export const SimFinancialDetail: React.FC<SimFinancialDetailProps> = ({ sim, isO
                       tone={summary.grossMargin != null ? (summary.grossMargin >= 0 ? 'success' : 'danger') : 'neutral'}
                       isIncomplete={summary.historicalMissingPurchaseCost}
                     />
+                  </div>
+
+                  {/* Ownership-transfer follow-up (سند مالکیت).
+                      The due date is the operator's hand-chosen follow-up date and
+                      drives the status. The calculated legal eligibility is shown
+                      below it, separately and as advisory context only, because it
+                      is a different fact from the date the operator chose. */}
+                  <div
+                    className="px-3 py-2 rounded-xl border bg-surface-subtle space-y-1.5"
+                    data-testid="sim-deed-status"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                      <span className="text-text-muted">انتقال سند مالکیت:</span>
+                      <span
+                        className={
+                          deedFollow.status === 'COMPLETED'
+                            ? 'font-semibold text-success'
+                            : deedFollow.status === 'OVERDUE'
+                            ? 'font-bold text-rose-600 dark:text-rose-400'
+                            : deedFollow.status === 'DUE_TODAY'
+                            ? 'font-semibold text-warning'
+                            : 'text-text-muted'
+                        }
+                        data-testid="sim-deed-follow-status"
+                      >
+                        {deedFollowStatusLabelFa(deedFollow.status)}
+                        {deedFollow.remainingDays !== null &&
+                          ` — ${deedRemainingLabelFa(deedFollow.remainingDays)}`}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-4 gap-1.5 text-[10px] pt-1 border-t border-border-subtle">
+                      <div className="flex flex-col">
+                        <span className="text-text-muted">سررسید انتخابی (دستی)</span>
+                        <span className="font-mono text-text-secondary" dir="ltr" data-testid="sim-deed-due-date">
+                          {sim.deedTransferDueDate ? formatPersianDate(sim.deedTransferDueDate, true) : '—'}
+                        </span>
+                      </div>
+                      <div className="flex flex-col">
+                        <span className="text-text-muted">تاریخ خرید</span>
+                        <span className="font-mono text-text-secondary" dir="ltr">
+                          {sim.purchaseDate ? formatPersianDate(sim.purchaseDate, true) : '—'}
+                        </span>
+                      </div>
+                      <div className="flex flex-col">
+                        <span className="text-text-muted">انتقال سند قبلی (مبنا)</span>
+                        <span className="font-mono text-text-secondary" dir="ltr">
+                          {sim.previousTransferDate ? formatPersianDate(sim.previousTransferDate, true) : '—'}
+                        </span>
+                      </div>
+                      <div className="flex flex-col">
+                        <span className="text-text-muted">مجاز قانونی از</span>
+                        <span className="font-mono text-text-secondary" dir="ltr" data-testid="sim-deed-next-eligible">
+                          {deedEligibility.nextEligibleDate
+                            ? formatPersianDate(deedEligibility.nextEligibleDate, true)
+                            : '—'}
+                        </span>
+                      </div>
+                    </div>
+
+                    {!sim.deedTransferCompletedAt &&
+                      !sim.deedTransferDueDate &&
+                      deedEligibility.status !== 'UNKNOWN' && (
+                        <p className="text-[10px] text-text-muted" data-testid="sim-deed-no-due-date">
+                          تاریخ سررسید انتخاب نشده است؛ برای زمان‌بندی یادآوری، آن را ثبت کنید.
+                        </p>
+                      )}
+
+                    {deedEligibility.needsVerification && !sim.deedTransferCompletedAt && (
+                      <p className="text-[10px] font-semibold text-warning" data-testid="sim-deed-needs-verification">
+                        {deedEligibility.baseSource === 'PURCHASE_FALLBACK'
+                          ? 'تاریخ انتقال سند قبلی ثبت نشده است؛ محاسبه موقتاً بر پایه تاریخ خرید انجام شده و نیازمند بررسی است.'
+                          : 'برای این پرونده مبنای محاسبه ثبت نشده است؛ وضعیت مجاز قابل محاسبه نیست.'}
+                      </p>
+                    )}
+
+                    {deedEligibility.needsVerification && !sim.deedTransferCompletedAt && (
+                      <p className="text-[10px] font-semibold text-warning" data-testid="sim-deed-needs-verification">
+                        {deedEligibility.baseSource === 'PURCHASE_FALLBACK'
+                          ? 'تاریخ انتقال سند قبلی ثبت نشده است؛ محاسبه موقتاً بر پایه تاریخ خرید انجام شده و نیازمند بررسی است.'
+                          : 'برای این پرونده مبنای محاسبه ثبت نشده است؛ مهلت ۲۰ روزه قابل محاسبه نیست.'}
+                      </p>
+                    )}
+
+                    {sim.deedTransferOverride && sim.deedTransferOverrideReason && (
+                      <p className="text-[10px] text-text-muted">
+                        استثنای مصوب: {sim.deedTransferOverrideReason}
+                        {sim.deedTransferOverrideByUserId ? ` — توسط ${sim.deedTransferOverrideByUserId}` : ''}
+                      </p>
+                    )}
                   </div>
 
                   {(summary.purchaseBalance > 0 || summary.saleReceivable > 0) && (

@@ -3,10 +3,10 @@ import {
   LayoutDashboard, Users, UserPlus, Mic, PhoneCall, CheckSquare,
   CreditCard, FileText, BookOpen, Smartphone, Wrench,
   Paperclip, BarChart3, ShieldCheck, History, Settings, Database, Sparkles,
-  Scale, Inbox, Handshake, MessageCircle
+  Scale, Inbox, Handshake, MessageCircle, Globe
 } from 'lucide-react';
 import { User } from '../../types';
-import { isAdmin } from '../../lib/permissions';
+import { isAdmin, isGodOrAdmin } from '../../lib/permissions';
 import { Language } from '../../lib/i18n';
 
 export interface NavItemConfig {
@@ -40,6 +40,8 @@ export interface NavCounts {
 
 export function getNavSections(currentUser?: User, counts: NavCounts = {}, language: Language = 'fa'): NavSectionConfig[] {
   const userIsAdmin = isAdmin(currentUser);
+  // WordPress Sync setup is restricted to GOD and SUPER_ADMIN only.
+  const userIsSyncAdmin = isGodOrAdmin(currentUser);
   const {
     tasksCount = 0,
     checksCount = 0,
@@ -167,6 +169,13 @@ export function getNavSections(currentUser?: User, counts: NavCounts = {}, langu
           icon: Wrench,
           badge: repairsCount > 0 ? (language === 'fa' ? String(repairsCount) : String(repairsCount)) : undefined,
           badgeVariant: 'info',
+        },
+        {
+          id: 'wordpress-catalogue',
+          titleKey: 'nav.wordpress-catalogue',
+          defaultTitleFa: 'کاتالوگ وردپرس',
+          defaultTitleEn: 'WordPress Catalogue',
+          icon: Globe,
         },
       ],
     },
@@ -302,6 +311,19 @@ export function getNavSections(currentUser?: User, counts: NavCounts = {}, langu
                 icon: Database,
                 adminOnly: true,
               },
+              ...(userIsSyncAdmin
+                ? [
+                    {
+                      id: 'wordpress-sync' as const,
+                      titleKey: 'nav.wordpress-sync',
+                      descKey: 'nav.desc.wordpress-sync',
+                      defaultTitleFa: 'همگام‌سازی وردپرس',
+                      defaultTitleEn: 'WordPress Sync',
+                      icon: Globe,
+                      adminOnly: true,
+                    },
+                  ]
+                : []),
             ],
           },
         ]

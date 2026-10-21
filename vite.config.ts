@@ -34,11 +34,15 @@ export default defineConfig(() => {
       chunkSizeWarningLimit: 1500,
     },
     server: {
-      // HMR is disabled in AI Studio via DISABLE_HMR env var.
-      // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
-      hmr: process.env.DISABLE_HMR !== 'true',
-      // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
-      watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      // HMR is OFF by default. It only helps during local dev; on the HTTPS
+      // panel host (panel.mobilemeisam.ir) the Vite client upgrades the socket
+      // to wss:// while Vite's HMR server listens on plaintext ws://, so the
+      // protocol mismatch is rejected and the console fills with
+      // "WebSocket connection to wss://...:24678 failed / closed without opened".
+      // Re-enable locally with DISABLE_HMR=false.
+      hmr: process.env.DISABLE_HMR === 'false',
+      // Disable file watching when HMR is off to save CPU during agent edits.
+      watch: process.env.DISABLE_HMR !== 'false' ? null : {},
       // Allow serving on these hostnames (panel deployment domains)
       allowedHosts: [
         'panel.johannapage.website',

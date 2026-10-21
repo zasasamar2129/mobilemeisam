@@ -1,10 +1,10 @@
 import React, { useState, useMemo } from 'react';
-import { SimCard, SimOperator, SimType, SimStatus, Customer, Contract, User } from '../../types';
+import { SimCard, SimOperator, SimType, SimStatus, Customer, Contract, User, WebsiteListingStatus, WebsiteSyncStatus } from '../../types';
 import {
   Smartphone, Search, Plus, Sparkles, AlertTriangle,
   CheckCircle2, Edit3, Trash2, Tag, Layers, ArrowLeftRight,
   Users, Bookmark, ShoppingCart, Lock, XCircle, UserCheck,
-  Eye, ArrowUpDown, Handshake, Wallet
+  Eye, ArrowUpDown, Handshake, Wallet, Globe
 } from 'lucide-react';
 import { Button } from '../ui/Button';
 import { Badge } from '../ui/Badge';
@@ -17,9 +17,19 @@ import { formatToman } from '../../lib/currencyUtils';
 import { storage } from '../../services/storage';
 import { useToast } from '../ui/Toast';
 import { useTranslation } from '../../lib/i18n';
+import { formatPersianDate, isOverdue } from '../../lib/dateUtils';
+import {
+  computeDeedTransferEligibility,
+  computeDeedFollowStatus,
+  deedFollowStatusLabelFa,
+  deedRemainingLabelFa,
+} from '../../lib/deedTransfer';
+import { publishSim } from '../../services/wordpressSync';
 import { RegisteredHoldersModal } from './RegisteredHoldersModal';
 import { SimLifecycleModal, LifecycleMode } from './SimLifecycleModal';
+import { HorizontalScrollContainer } from '../ui/HorizontalScrollContainer';
 import { ListViewControls, usePersistentViewMode } from '../ui/ListViewControls';
+import { SimPublishModal } from './SimPublishModal';
 import { SimFinancialDetail } from './SimFinancialDetail';
 
 export interface SimListProps {
@@ -51,8 +61,11 @@ export const SimList: React.FC<SimListProps> = ({
   const [operatorFilter, setOperatorFilter] = useState<string>('ALL');
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
   const [roundOnly, setRoundOnly] = useState(false);
+  const [deedFilter, setDeedFilter] = useState<string>('ALL');
   const [selectedHolderFilter, setSelectedHolderFilter] = useState<{ id: string; name: string } | null>(null);
   const [sortBy, setSortBy] = useState<'price_desc' | 'price_asc' | 'phone'>('price_desc');
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [isBulkPublishing, setIsBulkPublishing] = useState(false);
 
   // View Mode & Pagination
   const [viewMode, setViewMode] = usePersistentViewMode('sims', 'list');
@@ -61,6 +74,7 @@ export const SimList: React.FC<SimListProps> = ({
 
   // Modals
   const [isHoldersModalOpen, setIsHoldersModalOpen] = useState(false);
+  const [publishSimState, setPublishSimState] = useState<SimCard | null>(null);
   const [financialSim, setFinancialSim] = useState<SimCard | null>(null);
   const [lifecycleModal, setLifecycleModal] = useState<{
     isOpen: boolean;
@@ -77,6 +91,8 @@ export const SimList: React.FC<SimListProps> = ({
       .filter((s) => {
         if (operatorFilter !== 'ALL' && s.operator !== operatorFilter) return false;
         if (statusFilter !== 'ALL' && s.status !== statusFilter) return false;
+        // Transfer follow-up filter, driven by the operator's hand-chosen due date.
+        if (deedFilter !== 'ALL' && computeDeedFollowStatus(s).status !== deedFilter) return false;
         if (roundOnly && !s.isRound) return false;
         if (selectedHolderFilter && s.registeredHolderId !== selectedHolderFilter.id) return false;
         if (!searchQuery.trim()) return true;
@@ -95,7 +111,7 @@ export const SimList: React.FC<SimListProps> = ({
         if (sortBy === 'phone') return a.phoneNumber.localeCompare(b.phoneNumber);
         return (b.salePrice || 0) - (a.salePrice || 0);
       });
-  }, [sims, searchQuery, operatorFilter, statusFilter, roundOnly, selectedHolderFilter, sortBy]);
+  }, [sims, searchQuery, operatorFilter, statusFilter, deedFilter, roundOnly, selectedHolderFilter, sortBy]);
 
   const totalPages = Math.ceil(filteredSims.length / pageSize) || 1;
   const paginatedSims = useMemo(() => {
@@ -108,6 +124,85 @@ export const SimList: React.FC<SimListProps> = ({
       .filter((s) => s.status === SimStatus.AVAILABLE)
       .reduce((sum, s) => sum + (s.salePrice || 0), 0);
   }, [filteredSims]);
+
+  /**
+   * Both views of a SIM's transfer state, from the same pure functions the API
+   * and the reminder scheduler use, so the column, the modal and the
+   * notifications can never disagree.
+   */
+  const deedEligibility = (s: SimCard) => computeDeedTransferEligibility(s);
+  /** Status of the operator's hand-chosen due date — this is what drives the list. */
+  const deedFollow = (s: SimCard) => computeDeedFollowStatus(s);
+
+  const toggleOne = (id: string, checked: boolean) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      checked ? next.add(id) : next.delete(id);
+      return next;
+    });
+  };
+
+  const toggleAll = (checked: boolean) => {
+    setSelectedIds(checked ? new Set(paginatedSims.map((s) => s.id)) : new Set());
+  };
+
+  /** Bulk publication. Every SIM is processed independently — one invalid
+   *  record never blocks the others. Results are reported per row. */
+  const handleBulkPublish = async () => {
+    const targets = (sims || []).filter((s) => selectedIds.has(s.id));
+    if (!targets.length) return;
+    setIsBulkPublishing(true);
+    let ok = 0;
+    let failed = 0;
+    for (const sim of targets) {
+      const res = await publishSim({ ...sim, websiteListingStatus: WebsiteListingStatus.PUBLISHED });
+      storage.saveSimCard({
+        ...sim,
+        websitePublishRequested: true,
+        websitePublicId: sim.websitePublicId || sim.id,
+        websiteListingStatus: WebsiteListingStatus.PUBLISHED,
+        websiteLastAttemptAt: new Date().toISOString(),
+        websiteSyncVersion: (sim.websiteSyncVersion || 0) + 1,
+        websiteSyncStatus: res.success ? WebsiteSyncStatus.SYNCED : WebsiteSyncStatus.FAILED,
+        websiteLastSyncAt: res.success ? new Date().toISOString() : sim.websiteLastSyncAt,
+        websiteLastErrorCode: res.success ? undefined : res.errorCode,
+      });
+      res.success ? ok++ : failed++;
+    }
+    setIsBulkPublishing(false);
+    setSelectedIds(new Set());
+    onRefreshSims();
+    failed === 0
+      ? success(isRtl ? `${ok} شماره با موفقیت منتشر شد.` : `${ok} SIM(s) published.`)
+      : success(isRtl ? `${ok} منتشر شد، ${failed} ناموفق.` : `${ok} published, ${failed} failed.`);
+  };
+
+  const getWebsiteBadge = (s: SimCard) => {
+    const status = s.websiteListingStatus;
+    if (!status || status === 'NOT_PUBLISHED') {
+      return <span className="text-[10px] text-slate-400">منتشر نشده</span>;
+    }
+    if (status === 'PUBLISHED') {
+      const syncFail = s.websiteSyncStatus === 'FAILED';
+      return (
+        <span className="flex flex-col gap-0.5">
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 font-bold border border-emerald-500/30 w-fit">
+            منتشر شده
+          </span>
+          {syncFail && (
+            <span className="text-[9px] text-rose-500 font-bold" title={s.websiteLastErrorCode}>
+              خطا در همگام‌سازی
+            </span>
+          )}
+        </span>
+      );
+    }
+    return (
+      <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-500/15 text-slate-600 dark:text-slate-400 font-bold border border-slate-500/30">
+        {status === 'SOLD' ? 'فروش رفته' : 'لغو منتشر'}
+      </span>
+    );
+  };
 
   const handleDelete = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -313,7 +408,63 @@ export const SimList: React.FC<SimListProps> = ({
             ))}
           </div>
         </div>
+
+        {/* Transfer follow-up filter, driven by the operator's chosen due date */}
+        <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-primary/60">
+          <span className="text-xs text-muted font-medium">انتقال سند:</span>
+          {[
+            { key: 'ALL', label: 'همه' },
+            { key: 'WAITING', label: 'در انتظار سررسید' },
+            { key: 'DUE_TODAY', label: 'سررسید امروز' },
+            { key: 'OVERDUE', label: 'سررسید گذشته' },
+            { key: 'COMPLETED', label: 'انجام‌شده' },
+            { key: 'NOT_SET', label: 'بدون تاریخ' },
+          ].map((df) => (
+            <button
+              key={df.key}
+              type="button"
+              data-testid={`deed-filter-${df.key}`}
+              onClick={() => {
+                setDeedFilter(df.key);
+                setCurrentPage(1);
+              }}
+              className={`text-xs px-2.5 py-1 rounded-lg transition-all ${
+                deedFilter === df.key
+                  ? 'bg-primary text-white font-semibold shadow-md shadow-indigo-600/30'
+                  : 'bg-surface-subtle dark:bg-surface-subtle/80 text-secondary hover:text-slate-900 dark:hover:text-slate-200 border border-primary'
+              }`}
+            >
+              {df.label}
+            </button>
+          ))}
+        </div>
       </div>
+
+      {/* Bulk publication bar — only shown when rows are selected */}
+      {selectedIds.size > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-2xl bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-900">
+          <div className="flex items-center gap-2 text-xs font-bold text-indigo-800 dark:text-indigo-300">
+            <Globe className="w-4 h-4 text-indigo-500" />
+            <span>{isRtl ? `${formatNumber(selectedIds.size)} شماره انتخاب شده` : `${selectedIds.size} selected`}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="xs" onClick={() => setSelectedIds(new Set())}>
+              {isRtl ? 'لغو انتخاب' : 'Clear'}
+            </Button>
+            <Button
+              variant="primary"
+              size="xs"
+              onClick={handleBulkPublish}
+              disabled={isBulkPublishing}
+              leftIcon={<Globe className="w-3 h-3" />}
+            >
+              {isBulkPublishing
+                ? (isRtl ? 'در حال انتشار...' : 'Publishing...')
+                : (isRtl ? 'انتشار شماره‌های انتخاب‌شده در سایت' : 'Publish selected to website')}
+            </Button>
+          </div>
+        </div>
+      )}
 
       {/* Standard ListViewControls with View Toggle (Card vs Row/List) & Pagination */}
       <ListViewControls
@@ -340,27 +491,43 @@ export const SimList: React.FC<SimListProps> = ({
         </div>
       ) : viewMode === 'list' ? (
         /* ROW / LIST VIEW (TABLE) */
-        <div className="overflow-x-auto rounded-2xl border border-primary bg-surface shadow-2xs">
+        <HorizontalScrollContainer className="rounded-2xl border border-primary bg-surface shadow-2xs">
           <table className="w-full text-right text-xs">
             <thead className="bg-surface-subtle/80 text-secondary font-bold border-b border-primary">
               <tr>
+                <th className="p-3 w-8">
+                  <Checkbox
+                    checked={paginatedSims.length > 0 && paginatedSims.every((s) => selectedIds.has(s.id))}
+                    onChange={(e) => toggleAll(e.target.checked)}
+                  />
+                </th>
                 <th className="p-3 w-40">شماره سیم‌کارت</th>
                 <th className="p-3 w-28">اپراتور</th>
                 <th className="p-3 w-24">نوع</th>
                 <th className="p-3 w-32">قیمت فروش</th>
                 <th className="p-3 w-28">وضعیت</th>
+                <th className="p-3 w-32">انتشار در سایت</th>
                 <th className="p-3 w-36">سندزن (دارنده)</th>
                 <th className="p-3">رزرو / خریدار / رهن</th>
+                <th className="p-3 w-44">تاریخ خرید / فروش / انتقال سند</th>
                 <th className="p-3 text-left w-52">اقدامات</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-              {paginatedSims.map((s) => (
+              {paginatedSims.map((s) => { const elig = deedEligibility(s); const follow = deedFollow(s); return (
                 <tr
                   key={s.id}
                   onClick={() => onEditSim(s)}
                   className="hover:bg-slate-50/80 dark:hover:bg-slate-800/50 transition-colors cursor-pointer"
                 >
+                  {/* Bulk selection */}
+                  <td className="p-3" onClick={(e) => e.stopPropagation()}>
+                    <Checkbox
+                      checked={selectedIds.has(s.id)}
+                      onChange={(e) => toggleOne(s.id, e.target.checked)}
+                    />
+                  </td>
+
                   {/* Phone number */}
                   <td className="p-3 font-mono font-black text-primary text-sm whitespace-nowrap" dir="ltr">
                     <div className="flex items-center gap-1.5">
@@ -398,6 +565,9 @@ export const SimList: React.FC<SimListProps> = ({
                     )}
                   </td>
 
+                  {/* Website publication status */}
+                  <td className="p-3 whitespace-nowrap">{getWebsiteBadge(s)}</td>
+
                   {/* Registered Holder */}
                   <td className="p-3 whitespace-nowrap text-secondary">
                     {s.registeredHolderName || '-'}
@@ -418,6 +588,63 @@ export const SimList: React.FC<SimListProps> = ({
                     {s.notes && !s.reservationCustomerName && !s.ownerCustomerName && (
                       <span className="truncate max-w-xs block">{s.notes}</span>
                     )}
+                  </td>
+
+                  {/* Purchase / Sale / Ownership-transfer dates. The follow-up
+                      status is driven by the operator's hand-chosen due date —
+                      the same value the reminder scheduler follows — so the list
+                      can never disagree with the modal or the notifications. */}
+                  <td className="p-3 text-[11px] whitespace-nowrap space-y-0.5" data-testid="sim-dates-cell">
+                    <div className="text-secondary">
+                      <span className="text-muted">خرید: </span>
+                      <span className="font-mono" dir="ltr">
+                        {s.purchaseDate ? formatPersianDate(s.purchaseDate, true) : '—'}
+                      </span>
+                    </div>
+                    <div className={s.saleDate ? 'text-emerald-600 dark:text-emerald-400 font-semibold' : 'text-muted'}>
+                      <span className="text-muted font-normal">فروش: </span>
+                      <span className="font-mono" dir="ltr">
+                        {s.saleDate ? formatPersianDate(s.saleDate, true) : '—'}
+                      </span>
+                    </div>
+                    <div data-testid="sim-deed-cell">
+                      <div
+                        className={
+                          follow.status === 'COMPLETED'
+                            ? 'text-emerald-600 dark:text-emerald-400 font-semibold'
+                            : follow.status === 'OVERDUE'
+                            ? 'text-rose-600 dark:text-rose-400 font-bold'
+                            : follow.status === 'DUE_TODAY'
+                            ? 'text-amber-600 dark:text-amber-400 font-semibold'
+                            : 'text-muted'
+                        }
+                      >
+                        <span className="text-muted font-normal">سررسید: </span>
+                        <span className="font-mono" dir="ltr">
+                          {s.deedTransferDueDate ? formatPersianDate(s.deedTransferDueDate, true) : '—'}
+                        </span>
+                      </div>
+                      <div
+                        className={
+                          follow.status === 'COMPLETED'
+                            ? 'text-emerald-600 dark:text-emerald-400 font-semibold'
+                            : follow.status === 'OVERDUE'
+                            ? 'text-rose-600 dark:text-rose-400 font-bold'
+                            : follow.status === 'DUE_TODAY'
+                            ? 'text-amber-600 dark:text-amber-400 font-semibold'
+                            : 'text-muted'
+                        }
+                        data-testid="sim-deed-status"
+                      >
+                        {deedFollowStatusLabelFa(follow.status)}
+                        {follow.remainingDays !== null && ` (${deedRemainingLabelFa(follow.remainingDays)})`}
+                      </div>
+                      {elig.needsVerification && follow.status !== 'COMPLETED' && (
+                        <div className="text-amber-600 dark:text-amber-400 font-semibold text-[10px]" data-testid="sim-deed-verification">
+                          نیازمند بررسی مبنای محاسبه
+                        </div>
+                      )}
+                    </div>
                   </td>
 
                   {/* Actions */}
@@ -475,6 +702,18 @@ export const SimList: React.FC<SimListProps> = ({
                         type="button"
                         onClick={(e) => {
                           e.stopPropagation();
+                          setPublishSimState(s);
+                        }}
+                        className="p-1.5 text-muted hover:text-sky-600 rounded-lg hover:bg-surface-subtle dark:hover:bg-slate-800"
+                        title="انتشار در وردپرس"
+                      >
+                        <Globe className="w-3.5 h-3.5" />
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
                           setFinancialSim(s);
                         }}
                         className="p-1.5 text-muted hover:text-primary rounded-lg hover:bg-surface-subtle dark:hover:bg-slate-800"
@@ -506,14 +745,15 @@ export const SimList: React.FC<SimListProps> = ({
                     </div>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
-        </div>
+        </HorizontalScrollContainer>
       ) : (
         /* CARD VIEW */
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
-          {paginatedSims.map((s) => (
+          {paginatedSims.map((s) => { const elig = deedEligibility(s); const follow = deedFollow(s); return (
             <div
               key={s.id}
               onClick={() => onEditSim(s)}
@@ -550,6 +790,66 @@ export const SimList: React.FC<SimListProps> = ({
                 </div>
 
                 {/* Price & Registered Holder Info */}
+                <div className="mt-3 p-2.5 rounded-xl bg-slate-50 dark:bg-surface-subtle/70 border border-primary/80 space-y-1.5 text-xs" data-testid="sim-card-dates">
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted">تاریخ خرید:</span>
+                    <span className="font-mono text-secondary" dir="ltr">
+                      {s.purchaseDate ? formatPersianDate(s.purchaseDate, true) : '—'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted">تاریخ فروش:</span>
+                    <span className={`font-mono ${s.saleDate ? 'text-emerald-600 dark:text-emerald-400 font-semibold' : 'text-secondary'}`} dir="ltr">
+                      {s.saleDate ? formatPersianDate(s.saleDate, true) : '—'}
+                    </span>
+                  </div>
+                  {/* Follow-up status is driven by the operator's hand-chosen due
+                      date. The calculated legal eligibility is shown as a muted,
+                      separate line so the two facts stay visibly distinct. */}
+                  <div className={`pt-1 border-t space-y-1 ${
+                    follow.status === 'COMPLETED'
+                      ? 'border-emerald-500/30 text-emerald-600 dark:text-emerald-400 font-semibold'
+                      : follow.status === 'OVERDUE'
+                      ? 'border-rose-500/30 text-rose-600 dark:text-rose-400 font-bold'
+                      : follow.status === 'DUE_TODAY'
+                      ? 'border-amber-500/30 text-amber-600 dark:text-amber-400 font-semibold'
+                      : 'border-primary/40 text-muted'
+                  }`}>
+                    <div className="flex items-center justify-between">
+                      <span>سررسید انتقال سند:</span>
+                      <span className="font-mono" dir="ltr">
+                        {s.deedTransferDueDate ? formatPersianDate(s.deedTransferDueDate, true) : '—'}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between text-[10px] font-bold">
+                      <span>وضعیت:</span>
+                      <span>
+                        {deedFollowStatusLabelFa(follow.status)}
+                        {follow.remainingDays !== null ? ` (${deedRemainingLabelFa(follow.remainingDays)})` : ''}
+                      </span>
+                    </div>
+                    {s.deedTransferCompletedAt && (
+                      <div className="flex items-center justify-between text-[10px]">
+                        <span>تاریخ تکمیل:</span>
+                        <span className="font-mono" dir="ltr">{formatPersianDate(s.deedTransferCompletedAt, true)}</span>
+                      </div>
+                    )}
+                    {!s.deedTransferCompletedAt && (
+                      <div className="flex items-center justify-between text-[10px] pt-1 border-t border-primary/40 opacity-80">
+                        <span>مجاز قانونی از:</span>
+                        <span className="font-mono" dir="ltr">
+                          {elig.nextEligibleDate ? formatPersianDate(elig.nextEligibleDate, true) : '—'}
+                        </span>
+                      </div>
+                    )}
+                    {elig.needsVerification && !s.deedTransferCompletedAt && (
+                      <div className="text-[10px] font-semibold text-amber-600 dark:text-amber-400 pt-1 border-t border-primary/40">
+                        نیازمند بررسی مبنای محاسبه
+                      </div>
+                    )}
+                  </div>
+                </div>
+
                 <div className="mt-3 p-2.5 rounded-xl bg-slate-50 dark:bg-surface-subtle/70 border border-primary/80 space-y-1.5 text-xs">
                   <div className="flex items-center justify-between">
                     <span className="text-muted">{t('sims.salePrice')}:</span>
@@ -662,6 +962,17 @@ export const SimList: React.FC<SimListProps> = ({
                     type="button"
                     onClick={(e) => {
                       e.stopPropagation();
+                      setPublishSimState(s);
+                    }}
+                    className="p-1 hover:text-sky-600 transition-colors"
+                    title="انتشار در وردپرس"
+                  >
+                    <Globe className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
                       onEditSim(s);
                     }}
                     className="p-1 hover:text-indigo-400 transition-colors"
@@ -680,9 +991,18 @@ export const SimList: React.FC<SimListProps> = ({
                 </div>
               </div>
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
+
+      {/* Sim Publishing Modal */}
+      <SimPublishModal
+        isOpen={!!publishSimState}
+        onClose={() => setPublishSimState(null)}
+        sim={publishSimState}
+        onSuccess={onRefreshSims}
+      />
 
       {/* Registered Holders Modal */}
       <RegisteredHoldersModal

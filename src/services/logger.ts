@@ -67,7 +67,13 @@ class LoggerService {
   private capture(level: LogLevel, args: any[], source: SystemLogEntry['source']) {
     try {
       const message = args
-        .map((arg) => (typeof arg === 'object' ? JSON.stringify(arg) : String(arg)))
+        .map((arg) => {
+          if (arg instanceof Error) return arg.message || arg.toString();
+          if (arg && typeof arg === 'object') {
+            try { return JSON.stringify(arg); } catch { return String(arg); }
+          }
+          return String(arg);
+        })
         .join(' ');
       
       // Skip repetitive internal noise

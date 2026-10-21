@@ -18,9 +18,15 @@ import { useTranslation } from '../../lib/i18n';
 import { FilePreviewModal } from '../ui/FilePreviewModal';
 import { AttachmentItem } from './AttachmentItem';
 import { InternalDocumentShareModal } from './InternalDocumentShareModal';
+import {
+  useCustomerCreationHandoff,
+  customerCreateOption,
+  CUSTOMER_CREATE_VALUE,
+} from '../customers/useCustomerCreationHandoff';
 import { RenameDocumentModal } from './RenameDocumentModal';
 import { DocumentAuditLog } from './DocumentAuditLog';
 import { detectFileInfo, createThumbnail } from '../../lib/filePreviewUtils';
+import { HorizontalScrollContainer } from '../ui/HorizontalScrollContainer';
 import { ListViewControls } from '../ui/ListViewControls';
 import { UploadItem, validateUploadFile, makeUploadKey } from '../../lib/uploadTypes';
 import { uploadManager, UploadResult } from '../../lib/uploadManager';
@@ -31,7 +37,7 @@ export interface AttachmentListProps {
   customers: Customer[];
   currentUser?: User;
   onRefresh: () => void;
-  onSelectCustomer: (customerId: string) => void;
+  onSelectCustomer?: (customerId: string) => void;
 }
 
 type FileFilterType = 'ALL' | 'IMAGE' | 'PDF' | 'DOCUMENT';
@@ -44,6 +50,7 @@ export const AttachmentList: React.FC<AttachmentListProps> = ({
   onSelectCustomer,
 }) => {
   const { success, error } = useToast();
+  const customerHandoff = useCustomerCreationHandoff();
   const { t, isRtl } = useTranslation();
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCustomerId, setSelectedCustomerId] = useState('');
@@ -443,7 +450,16 @@ export const AttachmentList: React.FC<AttachmentListProps> = ({
             <select
               ref={selectRef}
               value={selectedCustomerId}
-              onChange={(e) => handleCustomerSelectChange(e.target.value)}
+              onChange={(e) => {
+                if (e.target.value === CUSTOMER_CREATE_VALUE) {
+                  // Do NOT route through handleCustomerSelectChange: that would
+                  // try to save the pending file against the sentinel id. The
+                  // pending file is kept and attached once a real customer is set.
+                  customerHandoff.open((c) => handleCustomerSelectChange(c.id));
+                  return;
+                }
+                handleCustomerSelectChange(e.target.value);
+              }}
               className={`w-full text-xs px-3.5 py-2.5 rounded-xl bg-white dark:bg-slate-900/90 border text-slate-900 dark:text-slate-100 focus:outline-none transition-all ${
                 isSelectHighlighted
                   ? 'border-amber-500 ring-2 ring-amber-500/30 bg-amber-50 dark:bg-amber-950/20'
@@ -456,6 +472,7 @@ export const AttachmentList: React.FC<AttachmentListProps> = ({
                   {c.name} ({c.mobile})
                 </option>
               ))}
+              <option value={CUSTOMER_CREATE_VALUE}>{customerCreateOption().label}</option>
             </select>
           </div>
 
@@ -684,7 +701,13 @@ export const AttachmentList: React.FC<AttachmentListProps> = ({
               </label>
               <select
                 value={newTargetCustomerId}
-                onChange={(e) => setNewTargetCustomerId(e.target.value)}
+                onChange={(e) => {
+                  if (e.target.value === CUSTOMER_CREATE_VALUE) {
+                    customerHandoff.open((c) => setNewTargetCustomerId(c.id));
+                    return;
+                  }
+                  setNewTargetCustomerId(e.target.value);
+                }}
                 className="w-full text-xs px-3.5 py-2.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:border-indigo-500"
               >
                 <option value="">{isRtl ? '-- بدون انتساب (بایگانی عمومی اسناد) --' : '-- No customer (General document) --'}</option>
@@ -693,6 +716,7 @@ export const AttachmentList: React.FC<AttachmentListProps> = ({
                     {c.name} ({c.mobile})
                   </option>
                 ))}
+                <option value={CUSTOMER_CREATE_VALUE}>{customerCreateOption().label}</option>
               </select>
             </div>
 
@@ -707,6 +731,7 @@ export const AttachmentList: React.FC<AttachmentListProps> = ({
           </div>
         </Modal>
       )}
+      {customerHandoff.modal}
     </div>
   );
 };

@@ -13,6 +13,8 @@ import { RTLNumber } from '../ui/RTLNumber';
 import { exportToExcel } from '../../lib/exportToExcel';
 import { formatToman } from '../../lib/currencyUtils';
 import { useTranslation } from '../../lib/i18n';
+import { canViewAllTasks } from '../../lib/permissions';
+import { storage } from '../../services/storage';
 
 export interface ReportsDashboardProps {
   customers: Customer[];
@@ -37,6 +39,7 @@ export const ReportsDashboard: React.FC<ReportsDashboardProps> = ({
 }) => {
   const { t, isRtl, formatCurrency } = useTranslation();
   const [dateRange, setDateRange] = useState<'all' | 'month' | 'quarter'>('all');
+  const currentUser = storage.getCurrentUser();
 
   // Stats calculation
   const totalRevenue = useMemo(() => {
@@ -58,6 +61,10 @@ export const ReportsDashboard: React.FC<ReportsDashboardProps> = ({
     const completed = tasks.filter((t) => t.status === 'COMPLETED').length;
     return Math.round((completed / tasks.length) * 100);
   }, [tasks]);
+
+  // The server scopes tasks to the caller, so for anyone without the management
+  // scope this ratio describes their own workload — not the system total.
+  const tasksAreManagementScope = canViewAllTasks(currentUser);
 
   const totalSimInventoryValue = useMemo(() => {
     return sims
@@ -170,7 +177,11 @@ export const ReportsDashboard: React.FC<ReportsDashboardProps> = ({
           <div className="text-xl sm:text-2xl font-black text-teal-600 dark:text-teal-300">
             <RTLNumber value={completedTasksRatio} type="percentage" />
           </div>
-          <p className="text-[11px] text-slate-500 dark:text-slate-400">{isRtl ? `از مجموع ${tasks.length} اقدام تعریف شده` : `Out of ${tasks.length} total tasks`}</p>
+          <p className="text-[11px] text-slate-500 dark:text-slate-400">
+            {tasksAreManagementScope
+              ? (isRtl ? `از مجموع ${tasks.length} اقدام تعریف شده` : `Out of ${tasks.length} total tasks`)
+              : (isRtl ? `از مجموع ${tasks.length} اقدام مرتبط با شما` : `Out of ${tasks.length} tasks assigned to you`)}
+          </p>
         </div>
       </div>
 

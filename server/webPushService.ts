@@ -113,13 +113,25 @@ class WebPushService {
       },
     };
 
+    // iOS 16.4+ only renders a Web Push notification when the raw JSON carries an
+    // `alert` object; a flat {title, body} payload is silently dropped even with a
+    // valid subscription. The top-level fields are kept because sw.js reads them,
+    // so one payload satisfies both iOS and Android/desktop.
     const notificationPayload = JSON.stringify({
+      alert: {
+        title: payload.title,
+        body: payload.body,
+        icon: '/icon-192.png',
+        badge: '/icon-192.png',
+      },
       title: payload.title,
       body: payload.body,
       icon: '/icon-192.png',
       badge: '/icon-192.png',
       tag: payload.notificationId || `mmba-${Date.now()}`,
       priority: payload.priority || 'NORMAL',
+      dir: 'rtl',
+      lang: 'fa',
       data: {
         notificationId: payload.notificationId,
         targetType: payload.targetType,

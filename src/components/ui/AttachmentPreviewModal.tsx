@@ -31,6 +31,7 @@ import {
   formatFileSize,
   getAttachmentSrc,
   downloadAttachment,
+  createThumbnail,
 } from '../../lib/filePreviewUtils';
 
 export interface AttachmentPreviewModalProps {
@@ -117,6 +118,30 @@ export const AttachmentPreviewModal: React.FC<AttachmentPreviewModalProps> = ({
   const currentAtt = attachment;
   const fileInfo = currentAtt ? detectFileInfo(currentAtt) : null;
   const originalFileName = currentAtt?.fileName || (currentAtt as any)?.filename || 'file';
+
+  // HEIC/HEIF cannot be decoded by <img> in any browser — convert to JPEG
+  // (heic2any) before rendering, otherwise the lightbox shows a broken image.
+  const [convertedImage, setConvertedImage] = useState<string | null>(null);
+  const isHeic =
+    !!fileInfo &&
+    (fileInfo.mimeType === 'image/heic' ||
+      fileInfo.mimeType === 'image/heif' ||
+      (currentAtt?.fileName || '').toLowerCase().match(/\.(heic|heif)$/));
+
+  useEffect(() => {
+    if (!isOpen || !currentAtt || !isHeic) {
+      setConvertedImage(null);
+      return;
+    }
+    let cancelled = false;
+    const src = getAttachmentSrc(currentAtt) || currentAtt.dataUrl || '';
+    createThumbnail(src).then((thumb) => {
+      if (!cancelled) setConvertedImage(thumb || null);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, currentAtt?.id, isHeic]);
 
   // Navigation helpers
   const currentIndex = attachmentsList.findIndex((a) => a.id === currentAtt?.id);
@@ -546,13 +571,21 @@ export const AttachmentPreviewModal: React.FC<AttachmentPreviewModalProps> = ({
               <img
                 ref={imageRef}
                 id="preview-active-image"
-                src={previewSrc}
+                // HEIC/HEIF: browsers cannot decode these, so render the
+                // heic2any-converted JPEG instead of the raw data URL.
+                src={isHeic ? (convertedImage || '') : previewSrc}
                 alt={originalFileName}
                 loading="eager"
                 referrerPolicy="no-referrer"
-                onLoad={() => setIsLoading(false)}
+                onLoad={() => {
+                  setIsLoading(false);
+                  // A raw HEIC data URL always errors in <img>; if the
+                  // conversion produced nothing, fall back to the file card.
+                  if (isHeic && !convertedImage) setLoadError(true);
+                }}
                 onError={() => {
                   setIsLoading(false);
+                  if (isHeic && !convertedImage) return; // conversion still in flight
                   setLoadError(true);
                 }}
                 className={`max-w-[92vw] max-h-[82vh] object-contain rounded-xl shadow-2xl transition-opacity duration-200 ${

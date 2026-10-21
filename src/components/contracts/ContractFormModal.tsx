@@ -11,6 +11,7 @@ import { useToast } from '../ui/Toast';
 import { FileSignature, Check, Calendar, DollarSign } from 'lucide-react';
 import { formatToman } from '../../lib/currencyUtils';
 import { useTranslation } from '../../lib/i18n';
+import { useCustomerCreationHandoff, CUSTOMER_CREATE_VALUE, customerCreateOption } from '../customers/useCustomerCreationHandoff';
 
 export interface ContractFormModalProps {
   isOpen: boolean;
@@ -43,14 +44,17 @@ export const ContractFormModal: React.FC<ContractFormModalProps> = ({
   const [endDate, setEndDate] = useState('');
   const [terms, setTerms] = useState('');
   const [notes, setNotes] = useState('');
+  // "Create customer" handoff — the form stays mounted underneath the customer
+  // modal, so the contract draft survives the round-trip.
+  const customerHandoff = useCustomerCreationHandoff();
 
   useEffect(() => {
     if (contractToEdit) {
       setContractNumber(contractToEdit.contractNumber || '');
       setTitle(contractToEdit.title || '');
       setCustomerId(contractToEdit.customerId || '');
-      setContractType(contractToEdit.contractType || ContractType.SIM_SALE);
-      setStatus(contractToEdit.status || ContractStatus.DRAFT);
+      setContractType((contractToEdit.contractType || ContractType.SIM_SALE) as ContractType);
+      setStatus((contractToEdit.status || ContractStatus.DRAFT) as ContractStatus);
       setTotalAmount(String(contractToEdit.totalAmount || ''));
       setPrePaymentAmount(String(contractToEdit.prePaymentAmount || ''));
       setStartDate(contractToEdit.startDate ? contractToEdit.startDate.substring(0, 10) : '');
@@ -73,7 +77,7 @@ export const ContractFormModal: React.FC<ContractFormModalProps> = ({
       setTerms(isRtl ? 'طرفین متعهد به رعایت مفاد قوانین جاری کشور و تحویل به‌موقع موضوع قرارداد می‌باشند.' : 'The parties agree to fulfill the terms and conditions outlined in this agreement.');
       setNotes('');
     }
-  }, [contractToEdit, initialCustomer, allCustomers, isOpen]);
+  }, [contractToEdit, initialCustomer, isOpen]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -121,6 +125,7 @@ export const ContractFormModal: React.FC<ContractFormModalProps> = ({
   const rawTotal = Number(totalAmount.replace(/,/g, '')) || 0;
 
   return (
+    <>
     <Modal
       isOpen={isOpen}
       onClose={onClose}
@@ -181,12 +186,21 @@ export const ContractFormModal: React.FC<ContractFormModalProps> = ({
         <Select
           label={t('contracts.customer')}
           value={customerId}
-          onChange={(e) => setCustomerId(e.target.value)}
+          onChange={(e) => {
+            if (e.target.value === CUSTOMER_CREATE_VALUE) {
+              customerHandoff.open((c) => setCustomerId(c.id));
+            } else {
+              setCustomerId(e.target.value);
+            }
+          }}
           isRequired
-          options={(allCustomers || []).map((c) => ({
-            value: c.id,
-            label: `${c.name} (${c.mobile})${c.companyName ? ` - ${c.companyName}` : ''}`,
-          }))}
+          options={[
+            customerCreateOption(),
+            ...(allCustomers || []).map((c) => ({
+              value: c.id,
+              label: `${c.name} (${c.mobile})${c.companyName ? ` - ${c.companyName}` : ''}`,
+            })),
+          ]}
         />
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
@@ -248,5 +262,7 @@ export const ContractFormModal: React.FC<ContractFormModalProps> = ({
         </div>
       </form>
     </Modal>
+      {customerHandoff.modal}
+    </>
   );
 };

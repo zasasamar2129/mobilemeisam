@@ -5,6 +5,7 @@ import { useToast } from '../ui/Toast';
 import { useTranslation } from '../../lib/i18n';
 import { formatPersianDate } from '../../lib/dateUtils';
 import { formatToman } from '../../lib/currencyUtils';
+import { HorizontalScrollContainer } from '../ui/HorizontalScrollContainer';
 import { Button } from '../ui/Button';
 import { Badge } from '../ui/Badge';
 import { Modal } from '../ui/Modal';
@@ -142,7 +143,7 @@ export const ConsignmentList: React.FC<ConsignmentListProps> = ({
       // Update the SIM status to SOLD if not already
       const sim = sims.find((s) => s.id === sellCons.simId);
       if (sim && sim.status !== 'SOLD') {
-        await storage.sellSimCard(sim.id, {
+        const sold = await storage.sellSimCard(sim.id, {
           customerId: saleBuyerId,
           customerName: buyer?.name || 'خریدار',
           contractId: `cnt-auto-${Date.now()}`,
@@ -152,8 +153,9 @@ export const ConsignmentList: React.FC<ConsignmentListProps> = ({
           buyerNationalId: buyer?.nationalId,
           deliveryMethod: 'OFFICE_PICKUP',
         });
-        // restore consignment ownership marker on the sim
-        await storage.saveSimCard({ ...sim, isConsigned: false, consignmentStatus: 'SOLD' });
+        // restore consignment ownership marker on the sim — re-read the sold
+        // row (not the pre-sale snapshot) so status/saleDate survive the write.
+        await storage.saveSimCard({ ...sold, isConsigned: false, consignmentStatus: 'SOLD' });
       }
 
       storage.logAudit({
@@ -328,7 +330,7 @@ export const ConsignmentList: React.FC<ConsignmentListProps> = ({
           <p className="text-xs text-slate-500">{t('consignment.noConsignmentsDesc')}</p>
         </div>
       ) : (
-        <div className="overflow-x-auto rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
+        <HorizontalScrollContainer className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
           <table className="w-full text-right text-xs">
             <thead className="bg-slate-100 dark:bg-slate-800/80 text-slate-700 dark:text-slate-300 font-bold border-b border-slate-200 dark:border-slate-700">
               <tr>
@@ -390,7 +392,7 @@ export const ConsignmentList: React.FC<ConsignmentListProps> = ({
               ))}
             </tbody>
           </table>
-        </div>
+        </HorizontalScrollContainer>
       )}
 
       {/* Detail Modal */}

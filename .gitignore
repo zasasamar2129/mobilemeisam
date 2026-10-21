@@ -6,3 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# VAPID private key — never commit
+data/vapid_keys.json

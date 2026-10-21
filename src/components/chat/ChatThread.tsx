@@ -1,16 +1,21 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { ChatMessage, Attachment, User, ChatConversation, ConversationType } from '../../types';
+import { ChatMessage, Attachment, User, ChatConversation, ConversationType, ChatMessageReaction } from '../../types';
 import { useTranslation } from '../../lib/i18n';
 import { formatPersianDate } from '../../lib/dateUtils';
+import { storage } from '../../services/storage';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
 import { AttachmentPreviewModal } from '../ui/AttachmentPreviewModal';
 import { AttachDocumentModal } from './AttachDocumentModal';
 import { DeleteMessageModal } from './DeleteMessageModal';
 import { ChatComposer } from '../ui/ChatComposer';
+import { VoiceRecorder } from './VoiceRecorder';
+import { uploadManager } from '../../lib/uploadManager';
+import { EmojiPicker } from '../ui/EmojiPicker';
 import {
   Send, Users, MoreVertical, Edit2, Trash2,
-  X, Check, AlertCircle, FileText, Pin, Info, Paperclip
+  X, Check, AlertCircle, FileText, Pin, Info, Paperclip,
+  CheckCheck, Smile, Mic, ArrowRight
 } from 'lucide-react';
 
 export interface ChatThreadProps {
@@ -18,7 +23,7 @@ export interface ChatThreadProps {
   conversationTitle: string;
   messages: ChatMessage[];
   currentUserId: string;
-  onSend: (body: string, attachments?: { attachment_id: string; attachment_name: string; attachment_file_size?: number; attachment_file_type?: string }[]) => void;
+  onSend: (body: string, attachments?: { attachment_id: string; attachment_name: string; attachment_file_size?: number; attachment_file_type?: string }[], replyToMessageId?: string) => void;
   onEditMessage: (messageId: string, newBody: string) => void;
   onDeleteMessage: (messageId: string, reason: string) => void;
   onAttachDocument: (messageId: string, documentId: string) => void;
@@ -29,6 +34,8 @@ export interface ChatThreadProps {
   attachments: Attachment[];
   users?: User[];
   isAdmin?: boolean;
+  onReact?: (messageId: string, emoji: string) => void;
+  onTypingChange?: (isTyping: boolean) => void;
 }
 
 export const ChatThread: React.FC<ChatThreadProps> = ({
@@ -47,6 +54,8 @@ export const ChatThread: React.FC<ChatThreadProps> = ({
   attachments = [],
   users = [],
   isAdmin = false,
+  onReact,
+  onTypingChange,
 }) => {
   const { isRtl } = useTranslation();
   const [draft, setDraft] = useState('');
@@ -56,11 +65,40 @@ export const ChatThread: React.FC<ChatThreadProps> = ({
   const [deletingMessageId, setDeletingMessageId] = useState<string | null>(null);
   const [editingMessage, setEditingMessage] = useState<ChatMessage | null>(null);
   const [editDraft, setEditDraft] = useState('');
+  const [reactingTo, setReactingTo] = useState<string | null>(null);
+  const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
+  const [showVoiceRecorder, setShowShowVoiceRecorder] = useState(false);
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
 
   const isGroup = conversation.type === ConversationType.GROUP || conversation.type === 'GROUP';
+
+  // Typing members (excluding me) — re-read on every conversation change since the
+  // flag lives on the member record and arrives via the 3.5s sync.
+  const typingUserIds = storage.getTypingUserIds(conversation.id, currentUserId);
+
+  const peerId = !isGroup
+    ? (conversation.member_ids || []).find((id: string) => id !== currentUserId)
+    : undefined;
+  const peer = peerId ? users.find((u) => u.id === peerId) : undefined;
+  const peerOnline = peerId ? storage.isUserOnline(peerId) : false;
+  const onlineMemberCount = isGroup
+    ? (conversation.member_ids || []).filter((id: string) => id !== currentUserId && storage.isUserOnline(id)).length
+    : 0;
+
+  // Report local typing upward; the parent debounces it into the API call.
+  const handleDraftChange = (v: string) => {
+    setDraft(v);
+    onTypingChange?.(v.trim().length > 0);
+  };
+
+  useEffect(() => {
+    return () => {
+      // Leaving the thread or switching conversations must not leave a stuck flag.
+      onTypingChange?.(false);
+    };
+  }, [conversation.id]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -77,9 +115,10 @@ export const ChatThread: React.FC<ChatThreadProps> = ({
       attachment_file_type: a.fileType,
     }));
 
-    onSend(trimmed, attPayload.length > 0 ? attPayload : undefined);
+    onSend(trimmed, attPayload.length > 0 ? attPayload : undefined, replyingTo?.id);
     setDraft('');
     setPendingAttachments([]);
+    setReplyingTo(null);
     composerRef.current?.focus();
   };
 
@@ -127,12 +166,50 @@ export const ChatThread: React.FC<ChatThreadProps> = ({
                 <Badge variant="warning" size="sm">{isRtl ? 'مهم' : 'Important'}</Badge>
               )}
             </div>
-            <p className="text-[10px] text-slate-400 mt-0.5">
-              {isGroup
-                ? `${(conversation.member_ids || []).length} ${isRtl ? 'عضو گروه' : 'members'}`
-                : isRtl ? 'گفتگوی مستقیم خصوصی' : 'Direct Conversation'}
-              {' • '}
-              {(messages || []).length} {isRtl ? 'پیام' : 'messages'}
+            <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 flex items-center gap-1.5">
+              {isGroup ? (
+                <>
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                      onlineMemberCount > 0 ? 'bg-emerald-500' : 'bg-slate-400'
+                    }`}
+                    aria-hidden
+                  />
+                  <span>
+                    {onlineMemberCount > 0
+                      ? isRtl
+                        ? `${onlineMemberCount} نفر آنلاین`
+                        : `${onlineMemberCount} online`
+                      : isRtl
+                      ? 'همه آفلاین'
+                      : 'All offline'}
+                    {' · '}
+                    {(conversation.member_ids || []).length} {isRtl ? 'عضو' : 'members'}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                      peerOnline ? 'bg-emerald-500' : 'bg-slate-400'
+                    }`}
+                    aria-hidden
+                  />
+                  <span>
+                    {peerOnline
+                      ? isRtl
+                        ? 'آنلاین'
+                        : 'Online'
+                      : isRtl
+                      ? 'آفلاین'
+                      : 'Offline'}
+                  </span>
+                </>
+              )}
+              <span className="opacity-60">
+                {' • '}
+                {(messages || []).length} {isRtl ? 'پیام' : 'messages'}
+              </span>
             </p>
           </div>
         </div>
@@ -199,6 +276,15 @@ export const ChatThread: React.FC<ChatThreadProps> = ({
               )}
 
               <div className="relative max-w-[82%] sm:max-w-[70%]">
+                <div className="absolute top-0 opacity-0 group-hover/msg:opacity-100 transition-opacity -right-10 flex gap-1">
+                  <button
+                    onClick={() => setReplyingTo(m)}
+                    className="p-1 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-500 hover:text-indigo-600 shadow-xs"
+                    title={isRtl ? 'پاسخ به این پیام' : 'Reply'}
+                  >
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
                 {/* Message Bubble */}
                 <div
                   className={`rounded-2xl px-3.5 py-2.5 text-xs leading-relaxed shadow-xs transition-all ${
@@ -258,23 +344,99 @@ export const ChatThread: React.FC<ChatThreadProps> = ({
                     </div>
                   )}
 
-                  {/* Footer (timestamp, edited, status) */}
-                  <div className={`flex items-center gap-1.5 mt-1.5 text-[9px] ${mine ? 'text-indigo-200' : 'text-slate-400'}`}>
+                  {/* Footer (timestamp, edited, delivery status) */}
+                  <div className={`flex items-center gap-1.5 mt-1.5 text-[9px] ${mine ? 'text-indigo-200' : 'text-slate-500 dark:text-slate-400'}`}>
                     <span>{formatPersianDate(m.created_at || m.createdAt, true).split(' - ').pop()}</span>
                     {isEdited && !isDeleted && (
                       <span className="font-medium">({isRtl ? 'ویرایش‌شده' : 'edited'})</span>
                     )}
                     {mine && !isDeleted && (
-                      <span>{String(m.status) === 'READ' ? (isRtl ? 'خوانده' : 'Read') : (isRtl ? 'ارسال' : 'Sent')}</span>
+                      <span
+                        className="inline-flex items-center"
+                        title={
+                          String(m.status) === 'READ'
+                            ? isRtl
+                              ? 'خوانده شد'
+                              : 'Read'
+                            : isRtl
+                            ? 'ارسال شد'
+                            : 'Sent'
+                        }
+                      >
+                        {String(m.status) === 'READ' ? (
+                          <CheckCheck className="w-3.5 h-3.5 text-sky-300" strokeWidth={2.5} />
+                        ) : (
+                          <Check className="w-3.5 h-3.5 opacity-70" strokeWidth={2.5} />
+                        )}
+                      </span>
                     )}
                   </div>
                 </div>
 
+                {/* Reaction chips */}
+                {!isDeleted && (m.reactions || []).length > 0 && (
+                  <div className={`mt-1 flex flex-wrap gap-1 ${mine ? 'justify-start' : 'justify-end'}`}>
+                    {(m.reactions || []).reduce((acc: { emoji: string; users: ChatMessageReaction[] }[], r) => {
+                      const hit = acc.find((a) => a.emoji === r.emoji);
+                      if (hit) hit.users.push(r);
+                      else acc.push({ emoji: r.emoji, users: [r] });
+                      return acc;
+                    }, []).map((grp) => {
+                      const mineReacted = grp.users.some(
+                        (r) => r.user_id === currentUserId || r.userId === currentUserId
+                      );
+                      return (
+                        <button
+                          key={grp.emoji}
+                          type="button"
+                          onClick={() => onReact?.(m.id, grp.emoji)}
+                          title={grp.users.map((u) => u.user_name || u.userName).filter(Boolean).join('، ')}
+                          className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold border transition-colors ${
+                            mineReacted
+                              ? 'bg-violet-100 dark:bg-violet-500/20 border-violet-300 dark:border-violet-400/50 text-violet-800 dark:text-violet-200'
+                              : 'bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300'
+                          }`}
+                        >
+                          <span>{grp.emoji}</span>
+                          <span className="tabular-nums">{grp.users.length}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Emoji picker popover for this message */}
+                {reactingTo === m.id && (
+                  <div
+                    className={`absolute z-30 bottom-full mb-1 ${mine ? 'start-0' : 'end-0'}`}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <EmojiPicker
+                      compact
+                      onSelect={(emoji) => {
+                        onReact?.(m.id, emoji);
+                        setReactingTo(null);
+                      }}
+                      onClose={() => setReactingTo(null)}
+                    />
+                  </div>
+                )}
+
                 {/* Hover Action Menu */}
-                {!isDeleted && (canEdit || canDelete) && (
+                {!isDeleted && (canEdit || canDelete || onReact) && (
                   <div className={`absolute top-0 -translate-y-1/2 opacity-0 group-hover/msg:opacity-100 transition-opacity flex items-center gap-1 p-1 rounded-lg bg-white dark:bg-slate-800 shadow-md border border-slate-200 dark:border-slate-700 ${
                     mine ? '-start-16' : '-end-16'
                   }`}>
+                    {onReact && (
+                      <button
+                        type="button"
+                        onClick={() => setReactingTo(reactingTo === m.id ? null : m.id)}
+                        title={isRtl ? 'واکنش' : 'React'}
+                        className="p-1 rounded hover:bg-violet-50 dark:hover:bg-violet-500/20 text-violet-600 dark:text-violet-300"
+                      >
+                        <Smile className="w-3 h-3" />
+                      </button>
+                    )}
                     {canEdit && (
                       <button
                         type="button"
@@ -301,6 +463,28 @@ export const ChatThread: React.FC<ChatThreadProps> = ({
             </div>
           );
         })}
+        {/* Typing indicator — shown while other members are composing */}
+        {typingUserIds.length > 0 && (
+          <div className="flex items-center gap-2 px-3 pb-2 text-[11px] text-slate-500 dark:text-slate-400">
+            <span className="flex items-center gap-0.5" aria-hidden>
+              <span className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce" style={{ animationDelay: '0ms' }} />
+              <span className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce" style={{ animationDelay: '150ms' }} />
+              <span className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce" style={{ animationDelay: '300ms' }} />
+            </span>
+            <span className="truncate">
+              {typingUserIds.length === 1
+                ? (() => {
+                    const u = users.find((x) => x.id === typingUserIds[0]);
+                    const name = u?.name || (isRtl ? 'یک نفر' : 'Someone');
+                    return isRtl ? `${name} در حال نوشتن…` : `${name} is typing…`;
+                  })()
+                : isRtl
+                ? `${typingUserIds.length} نفر در حال نوشتن…`
+                : `${typingUserIds.length} people are typing…`}
+            </span>
+          </div>
+        )}
+
         <div ref={bottomRef} />
       </div>
 
@@ -345,7 +529,55 @@ export const ChatThread: React.FC<ChatThreadProps> = ({
       )}
 
       {/* Composer — standardized ChatComposer (§16: text + emoji + attachment) */}
+      {showVoiceRecorder && (
+        <VoiceRecorder
+          onSendVoice={async (blob, duration) => {
+            const file = new File([blob], `voice-${Date.now()}.webm`, { type: 'audio/webm' });
+            const sha256 = 'voice-sha-' + Date.now();
+            const key = 'voice-' + Date.now();
+            const reader = new FileReader();
+            reader.onload = async () => {
+              const dataUrl = reader.result as string;
+              const res = await uploadManager.upload({
+                file,
+                fileName: file.name,
+                fileSize: file.size,
+                fileType: 'audio/webm',
+                mimeType: 'audio/webm',
+                sha256,
+                key,
+                dataUrl,
+                uploadedByUserId: currentUserId,
+                uploadedByUserName: users.find(u => u.id === currentUserId)?.name || 'User',
+              });
+              if (res.ok && res.id) {
+                onSend('', [{
+                  attachment_id: res.id,
+                  attachment_name: file.name,
+                  attachment_file_size: file.size,
+                  attachment_file_type: 'audio/webm',
+                }], replyingTo?.id);
+                setReplyingTo(null);
+              }
+            };
+            reader.readAsDataURL(file);
+            setShowShowVoiceRecorder(false);
+          }}
+          onCancel={() => setShowShowVoiceRecorder(false)}
+        />
+      )}
       <div className="p-3 border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
+        {replyingTo && (
+          <div className="flex items-center justify-between gap-2 p-2 mb-2 bg-indigo-50 dark:bg-indigo-950/40 rounded-xl border border-indigo-100 dark:border-indigo-900/60 text-xs text-indigo-900 dark:text-indigo-200">
+            <div className="flex items-center gap-2 truncate">
+              <span className="font-bold shrink-0">{isRtl ? 'پاسخ به:' : 'Replying to:'}</span>
+              <span className="truncate">{replyingTo.body}</span>
+            </div>
+            <button type="button" onClick={() => setReplyingTo(null)} className="p-0.5 text-indigo-500 hover:text-indigo-700">
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
         <div className="flex items-end gap-2">
           {editingMessage ? (
             <div className="flex-1 flex items-center gap-2">
@@ -363,17 +595,26 @@ export const ChatThread: React.FC<ChatThreadProps> = ({
               </Button>
             </div>
           ) : (
-            <ChatComposer
-              composerRef={composerRef}
-              value={draft}
-              onChange={setDraft}
-              onSend={send}
-              onAttach={() => setIsAttachModalOpen(true)}
-              placeholder={isRtl ? 'پیام خود را بنویسید... (Enter ارسال)' : 'Type a message... (Enter to send)'}
-              maxLength={3000}
-              className="flex-1 min-w-0"
-              autoFocus={false}
-            />
+            <>
+              <Button
+                variant="outline"
+                size="md"
+                onClick={() => setShowShowVoiceRecorder((prev) => !prev)}
+                leftIcon={<Mic className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />}
+                title={isRtl ? 'ضبط پیام صوتی' : 'Record voice message'}
+              />
+              <ChatComposer
+                composerRef={composerRef}
+                value={draft}
+                onChange={handleDraftChange}
+                onSend={send}
+                onAttach={() => setIsAttachModalOpen(true)}
+                placeholder={isRtl ? 'پیام خود را بنویسید... (Enter ارسال)' : 'Type a message... (Enter to send)'}
+                maxLength={3000}
+                className="flex-1 min-w-0"
+                autoFocus={false}
+              />
+            </>
           )}
 
           {!editingMessage && (

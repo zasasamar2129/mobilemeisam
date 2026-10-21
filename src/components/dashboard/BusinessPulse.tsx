@@ -57,10 +57,10 @@ export const BusinessPulse: React.FC<BusinessPulseProps> = ({
   return (
     <div className="space-y-6 animate-blur-fade-up">
       {/* Top Banner / Welcome with Role Context */}
-      <div className="p-4 sm:p-6 rounded-3xl bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-500/20 text-right flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+      <div className="p-4 sm:p-6 rounded-3xl bg-linear-to-r from-violet-50 via-indigo-50 to-cyan-50 dark:from-slate-900 dark:via-indigo-950/80 dark:to-[#0f1123] border border-violet-200 dark:border-violet-500/20 text-right flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-xl">
         <div className="space-y-1">
           <div className="flex items-center gap-2">
-            <h1 className="text-lg sm:text-2xl font-extrabold text-slate-900 dark:text-slate-100">
+            <h1 className="text-lg sm:text-2xl font-extrabold text-slate-900 dark:text-white">
               سلام، {currentUser.name}
             </h1>
             <Badge variant="purple" size="sm">
@@ -87,7 +87,7 @@ export const BusinessPulse: React.FC<BusinessPulseProps> = ({
             size="sm"
             onClick={() => onOpenQuickAction('TASK')}
             leftIcon={<Plus className="w-4 h-4" />}
-            className="flex-1 sm:flex-none"
+            className="flex-1 sm:flex-none border-violet-300 dark:border-violet-500/30 text-violet-700 dark:text-white"
           >
             وظیفه جدید
           </Button>

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   Download, Upload, RefreshCw, Database, Sparkles, Check, Key,
-  Terminal, AlertTriangle, Sliders, ArchiveRestore, ShieldCheck, Bell, Users
+  Terminal, AlertTriangle, Sliders, ArchiveRestore, ShieldCheck, Bell, Users, Globe
 } from 'lucide-react';
 import { Button } from '../ui/Button';
 import { Badge } from '../ui/Badge';
@@ -13,6 +13,8 @@ import { DebugLogViewer } from './DebugLogViewer';
 import { ProblemReportViewer } from './ProblemReportViewer';
 import { BackupManager } from './BackupManager';
 import { NotificationSettingsManager } from './NotificationSettingsManager';
+import { WordpressSyncSettingsManager } from './WordpressSyncSettingsManager';
+import { WordpressCataloguePanel } from './WordpressCataloguePanel';
 import { RegisteredHoldersModal } from '../sims/RegisteredHoldersModal';
 import { User } from '../../types';
 import { useTranslation } from '../../lib/i18n';
@@ -20,13 +22,13 @@ import { useTranslation } from '../../lib/i18n';
 export interface SettingsBackupProps {
   onFullReset: () => void;
   currentUser?: User;
-  initialTab?: 'backups' | 'general' | 'notifications' | 'logs' | 'reports' | 'holders';
+  initialTab?: 'backups' | 'general' | 'notifications' | 'logs' | 'reports' | 'holders' | 'wordpress' | 'wp-catalogue';
 }
 
 export const SettingsBackup: React.FC<SettingsBackupProps> = ({ onFullReset, currentUser, initialTab = 'backups' }) => {
   const { language, t, isRtl } = useTranslation();
   const { success, error } = useToast();
-  const [activeTab, setActiveTab] = useState<'backups' | 'general' | 'notifications' | 'logs' | 'reports' | 'holders'>(initialTab);
+  const [activeTab, setActiveTab] = useState<'backups' | 'general' | 'notifications' | 'logs' | 'reports' | 'holders' | 'wordpress' | 'wp-catalogue'>(initialTab);
   const [apiKeyInput, setApiKeyInput] = useState(storage.getCustomGeminiKey() || '');
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [isHoldersModalOpen, setIsHoldersModalOpen] = useState(false);
@@ -133,6 +135,32 @@ export const SettingsBackup: React.FC<SettingsBackupProps> = ({ onFullReset, cur
         >
           <Sliders className="w-4 h-4" />
           <span>{t('settings.aiConfig')}</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab('wordpress')}
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl transition-all whitespace-nowrap ${
+            activeTab === 'wordpress'
+              ? 'bg-indigo-600 text-white shadow-xs font-bold'
+              : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+          }`}
+        >
+          <Globe className="w-4 h-4 text-sky-400" />
+          <span>راه‌اندازی وردپرس (WordPress Sync)</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab('wp-catalogue')}
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl transition-all whitespace-nowrap ${
+            activeTab === 'wp-catalogue'
+              ? 'bg-indigo-600 text-white shadow-xs font-bold'
+              : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+          }`}
+        >
+          <Globe className="w-4 h-4 text-sky-400" />
+          <span>کاتالوگ وردپرس</span>
         </button>
 
         <button
@@ -359,6 +387,12 @@ export const SettingsBackup: React.FC<SettingsBackupProps> = ({ onFullReset, cur
 
       {/* Tab: Push Notifications & Devices */}
       {activeTab === 'notifications' && <NotificationSettingsManager />}
+
+      {/* Tab: WordPress Sync Setup Wizard */}
+      {activeTab === 'wordpress' && <WordpressSyncSettingsManager />}
+
+      {/* Tab: WordPress Live Catalogue Panel */}
+      {activeTab === 'wp-catalogue' && <WordpressCataloguePanel />}
 
       {/* Tab: Live Debug Logs */}
       {activeTab === 'logs' && <DebugLogViewer />}

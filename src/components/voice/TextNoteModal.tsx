@@ -9,6 +9,11 @@ import { Input } from '../ui/Input';
 import { Textarea } from '../ui/Textarea';
 import { Select } from '../ui/Select';
 import { FileText, Check } from 'lucide-react';
+import {
+  useCustomerCreationHandoff,
+  customerCreateOption,
+  CUSTOMER_CREATE_VALUE,
+} from '../customers/useCustomerCreationHandoff';
 
 export interface TextNoteModalProps {
   isOpen: boolean;
@@ -29,6 +34,7 @@ export const TextNoteModal: React.FC<TextNoteModalProps> = ({
 }) => {
   const { success, error } = useToast();
   const { t, isRtl } = useTranslation();
+  const customerHandoff = useCustomerCreationHandoff();
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
   const [customerId, setCustomerId] = useState('');
@@ -93,6 +99,7 @@ export const TextNoteModal: React.FC<TextNoteModalProps> = ({
   };
 
   return (
+    <>
     <Modal
       isOpen={isOpen}
       onClose={onClose}
@@ -125,12 +132,19 @@ export const TextNoteModal: React.FC<TextNoteModalProps> = ({
           <Select
             label={isRtl ? 'مرتبط با مشتری' : 'Linked Customer'}
             value={customerId}
-            onChange={(e) => setCustomerId(e.target.value)}
+            onChange={(e) => {
+              if (e.target.value === CUSTOMER_CREATE_VALUE) {
+                customerHandoff.open((c) => setCustomerId(c.id));
+                return;
+              }
+              setCustomerId(e.target.value);
+            }}
           >
             <option value="">{isRtl ? 'بدون پیوند' : 'No link'}</option>
             {(allCustomers || []).map((c) => (
               <option key={c.id} value={c.id}>{c.name} ({c.phone || c.mobile || ''})</option>
             ))}
+            <option value={CUSTOMER_CREATE_VALUE}>{customerCreateOption().label}</option>
           </Select>
 
           <Select
@@ -163,5 +177,7 @@ export const TextNoteModal: React.FC<TextNoteModalProps> = ({
         </div>
       </form>
     </Modal>
+    {customerHandoff.modal}
+    </>
   );
 };

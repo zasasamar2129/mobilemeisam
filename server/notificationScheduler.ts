@@ -7,11 +7,30 @@ import {
   DeliveryStatus,
   UserNotificationDevice,
 } from '../src/types';
+import { deedReminderId, deedVerificationReminderId, computeDeedTransferEligibility } from '../src/lib/deedTransfer';
+
+/** One calendar day in ms — reminder scheduling is day-granular, not hour-granular. */
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 class NotificationScheduler {
   private intervalId: NodeJS.Timeout | null = null;
   private notifiedTaskKeys = new Set<string>();
   private isProcessing = false;
+
+  /** Quiet hours are stored as "HH:MM" strings and may wrap past midnight. */
+  private isWithinQuietHours(start?: string, end?: string): boolean {
+    if (!start || !end) return false;
+    const parse = (v: string) => {
+      const [h, m] = v.split(':').map(Number);
+      return (h || 0) * 60 + (m || 0);
+    };
+    const now = new Date();
+    const nowMin = now.getHours() * 60 + now.getMinutes();
+    const s = parse(start);
+    const e = parse(end);
+    if (s === e) return false;
+    return s < e ? nowMin >= s && nowMin < e : nowMin >= s || nowMin < e;
+  }
 
   public start(intervalMs = 15000) {
     if (this.intervalId) return;
@@ -99,7 +118,209 @@ class NotificationScheduler {
       }
 
       // ----------------------------------------------------
-      // 2. Snoozed Notifications Expired
+      // 2. SIM Ownership-Transfer Reminders
+      //
+      // Reminders follow the operator's MANUAL due date (`deedTransferDueDate`),
+      // which is the date they chose for follow-up. The calculated eligibility
+      // date is deliberately NOT used here: it is advisory, and a SIM may well
+      // be followed up on a date the operator picked independently of it.
+      //
+      // Three occurrences: one the day before the due date, one on the day, and
+      // a single overdue follow-up for a SIM whose date had already passed when
+      // it was entered (a reminder scheduled in the past would never fire).
+      //
+      // Reminder ids are derived from (sim, kind, due date), so scheduler
+      // retries, restarts and re-runs cannot duplicate. Editing the due date
+      // changes the ids, so the stale notices for the old date are pruned below.
+      // ----------------------------------------------------
+      const nowDay = Math.floor(now / DAY_MS);
+      const allSims = db.sims || [];
+      const deedSims = allSims.filter((s) => !s.deedTransferCompletedAt);
+
+      // A finished transfer must leave no future alert behind. Completed SIMs are
+      // skipped by the scheduling loop, so their pending reminders have to be
+      // pruned explicitly here — otherwise a reminder raised before completion
+      // would sit in the bell forever.
+      const completedDeedIds = new Set(
+        allSims.filter((s) => s.deedTransferCompletedAt).map((s) => s.id)
+      );
+      if (completedDeedIds.size > 0) {
+        await centralDb.mutate((database: any) => {
+          database.notifications = (database.notifications || []).filter(
+            (n: Notification) =>
+              !(
+                n.relatedEntityType === 'SIM_DEED' &&
+                n.relatedEntityId &&
+                completedDeedIds.has(n.relatedEntityId)
+              )
+          );
+        });
+      }
+
+      for (const sim of deedSims) {
+        const dueRaw = (sim.deedTransferDueDate || '').trim();
+        // No due date chosen: schedule nothing and cancel whatever was raised
+        // for a date that has since been cleared. Nothing is invented — an
+        // unset date stays visibly unset, with no alert behind it.
+        if (!dueRaw) {
+          const verifyOnly = deedVerificationReminderId(sim.id);
+          await centralDb.mutate((database: any) => {
+            database.notifications = (database.notifications || []).filter((n: Notification) => {
+              if (n.relatedEntityType !== 'SIM_DEED' || n.relatedEntityId !== sim.id) return true;
+              return n.id === verifyOnly;
+            });
+          });
+          continue;
+        }
+
+        const dueDate = new Date(dueRaw);
+        if (isNaN(dueDate.getTime())) continue;
+
+        const dueDay = Math.floor(dueDate.getTime() / DAY_MS);
+        const overdueId = deedReminderId(sim.id, dueRaw, 'due-overdue');
+
+        const reminders: { id: string; day: number; title: string; message: string }[] = [
+          {
+            id: deedReminderId(sim.id, dueRaw, 'day-before'),
+            day: dueDay - 1,
+            title: 'یادآور انتقال سند سیم‌کارت',
+            message: `موعد پیگیری انتقال سند سیم‌کارت ${sim.phoneNumber} فردا است. لطفاً وضعیت انتقال را در پرونده سیم‌کارت ثبت کنید.`,
+          },
+          {
+            id: deedReminderId(sim.id, dueRaw, 'on-due-date'),
+            day: dueDay,
+            title: 'موعد انتقال سند سیم‌کارت امروز است',
+            message: `امروز موعد پیگیری انتقال سند سیم‌کارت ${sim.phoneNumber} است. لطفاً وضعیت انتقال را ثبت کنید.`,
+          },
+        ];
+
+        // Drop every notice belonging to a superseded due date, so editing the
+        // date never leaves a stale alert behind. The overdue follow-up and the
+        // verification notice are kept: they are the CURRENT state of this SIM,
+        // and pruning them would delete a live alert on the next tick.
+        await centralDb.mutate((database: any) => {
+          const keep = new Set<string>([
+            ...reminders.map((r) => r.id),
+            overdueId,
+            deedVerificationReminderId(sim.id),
+          ]);
+          database.notifications = (database.notifications || []).filter((n: Notification) => {
+            if (n.relatedEntityType !== 'SIM_DEED' || n.relatedEntityId !== sim.id) return true;
+            return keep.has(n.id);
+          });
+        });
+
+        // Already past due when the date was entered or edited: a past-dated
+        // reminder would never fire, so raise a due/overdue follow-up instead.
+        if (dueDay <= nowDay) {
+          if (this.notifiedTaskKeys.has(overdueId)) continue;
+          this.notifiedTaskKeys.add(overdueId);
+          const alreadySent = (centralDb.getState().notifications || []).some((n) => n.id === overdueId);
+          if (alreadySent) continue;
+
+          const targetUserId = sim.assignedUserId || 'usr-admin';
+          const daysLate = nowDay - dueDay;
+          const savedNotif = await centralDb.saveNotification({
+            id: overdueId,
+            userId: targetUserId,
+            title: daysLate === 0 ? 'موعد انتقال سند سیم‌کارت امروز است' : 'انتقال سند سیم‌کارت معوق شده است',
+            message:
+              daysLate === 0
+                ? `امروز موعد پیگیری انتقال سند سیم‌کارت ${sim.phoneNumber} است. لطفاً وضعیت انتقال را ثبت کنید.`
+                : `موعد پیگیری انتقال سند سیم‌کارت ${sim.phoneNumber} ${daysLate} روز پیش بوده و ثبت نشده است. لطفاً پیگیری کنید.`,
+            body: `انتقال سند سیم‌کارت ${sim.phoneNumber} نیازمند پیگیری است.`,
+            category: 'REMINDER',
+            priority: 'HIGH',
+            read: false,
+            relatedEntityType: 'SIM_DEED',
+            relatedEntityId: sim.id,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          } as Notification);
+          await this.dispatchToUser(targetUserId, savedNotif);
+          continue;
+        }
+
+        for (const rem of reminders) {
+          // Fire when the reminder's day has arrived; never re-open a past
+          // occurrence that is more than a day old (a long outage must not
+          // spam every missed reminder at once).
+          if (rem.day > nowDay || nowDay - rem.day > 1) continue;
+
+          if (this.notifiedTaskKeys.has(rem.id)) continue;
+
+          const alreadySent = (centralDb.getState().notifications || []).some((n) => n.id === rem.id);
+          if (alreadySent) {
+            this.notifiedTaskKeys.add(rem.id);
+            continue;
+          }
+
+          this.notifiedTaskKeys.add(rem.id);
+          const targetUserId = sim.assignedUserId || 'usr-admin';
+          const notif: Notification = {
+            id: rem.id,
+            userId: targetUserId,
+            title: rem.title,
+            message: rem.message,
+            body: rem.message,
+            category: 'REMINDER',
+            priority: 'HIGH',
+            read: false,
+            relatedEntityType: 'SIM_DEED',
+            relatedEntityId: sim.id,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          };
+
+          const savedNotif = await centralDb.saveNotification(notif);
+          await this.dispatchToUser(targetUserId, savedNotif);
+        }
+      }
+
+      // ----------------------------------------------------
+      // 2b. Unconfirmed eligibility — verification nudge
+      //
+      // A SIM whose previous ownership-transfer date is unknown has no
+      // calculated eligibility date to schedule against. It must NOT get a
+      // reminder that pretends a deadline exists (that would be inventing a
+      // date), so it gets a single, stable verification notice instead. The id
+      // depends only on the SIM, so retries/restarts can never duplicate it.
+      // ----------------------------------------------------
+      const verifySims = allSims.filter(
+        (s) => !s.deedTransferCompletedAt && computeDeedTransferEligibility(s).needsVerification
+      );
+      for (const sim of verifySims) {
+        const verifyId = deedVerificationReminderId(sim.id);
+        if (this.notifiedTaskKeys.has(verifyId)) continue;
+        const alreadySent = (centralDb.getState().notifications || []).some((n) => n.id === verifyId);
+        if (alreadySent) {
+          this.notifiedTaskKeys.add(verifyId);
+          continue;
+        }
+        this.notifiedTaskKeys.add(verifyId);
+        const targetUserId = sim.assignedUserId || 'usr-admin';
+        const savedNotif = await centralDb.saveNotification({
+          id: verifyId,
+          userId: targetUserId,
+          title: 'بررسی سند انتقال سیم‌کارت مورد نیاز است',
+          message:
+            `سیم‌کارت ${sim.phoneNumber} بدون تاریخ انتقال سند قبلی ثبت شده است. ` +
+            'لطفاً تاریخ انتقال سند مالکیت پیشین را در پرونده سیم‌کارت ثبت کنید تا ' +
+            'تاریخ مجاز آن محاسبه و پیگیری شود.',
+          body: `سیم‌کارت ${sim.phoneNumber} نیازمند بررسی سند انتقال است.`,
+          category: 'REMINDER',
+          priority: 'MEDIUM',
+          read: false,
+          relatedEntityType: 'SIM_DEED',
+          relatedEntityId: sim.id,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        } as Notification);
+        await this.dispatchToUser(targetUserId, savedNotif);
+      }
+
+      // ----------------------------------------------------
+      // 3. Snoozed Notifications Expired
       // ----------------------------------------------------
       const notifications = db.notifications || [];
       for (const n of notifications) {
@@ -152,7 +373,30 @@ class NotificationScheduler {
       return;
     }
 
+    // 2. Honour the settings the UI already writes but nothing used to read:
+    //    a global off switch, and quiet hours. Critical/urgent alerts bypass
+    //    quiet hours so an escalation is never silently swallowed.
+    const settings = centralDb.getNotificationSettings();
+    if (settings?.enableNotifications === false) {
+      console.log(`[NotificationScheduler] Push disabled in settings; skipping push for ${userId}.`);
+      return;
+    }
+    const isCritical = notification.priority === 'URGENT' || notification.priority === 'HIGH' || notification.priority === 'CRITICAL';
+    if (settings?.quietHoursEnabled && !isCritical && this.isWithinQuietHours(settings.quietHoursStart, settings.quietHoursEnd)) {
+      console.log(`[NotificationScheduler] Within quiet hours; skipping push for ${userId}.`);
+      return;
+    }
+
     // 2. Send RFC8291 Web Push to each registered active device
+    //
+    // A SIM_DEED alert names a phone number, which is sensitive: the OS shows
+    // the push body on the lock screen. The in-app record keeps the full
+    // number (the operator needs it), but the system notification is masked.
+    const pushBody =
+      notification.relatedEntityType === 'SIM_DEED'
+        ? (notification.message || notification.body || '').replace(/\b(09\d{2})[\s-]?(\d{3})[\s-]?(\d{4})\b/g, '$1***$3')
+        : notification.message || notification.body || '';
+
     for (const dev of devices) {
       const pushDelivery: NotificationDelivery = {
         id: `del-push-${dev.id}-${notification.id}-${Date.now()}`,
@@ -168,7 +412,7 @@ class NotificationScheduler {
 
       const res = await webPushService.sendNotification(dev, {
         title: notification.title,
-        body: notification.message || notification.body || '',
+        body: pushBody,
         notificationId: notification.id,
         targetType: notification.relatedEntityType,
         targetId: notification.relatedEntityId,

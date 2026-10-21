@@ -67,20 +67,39 @@ export const BackupManager: React.FC<BackupManagerProps> = ({ currentUser, onRef
   });
 
   // Load All Backup Data
+  // Each endpoint is awaited independently instead of racing inside a single
+  // Promise.all: one failing route (e.g. /backups/health on an older server)
+  // used to abort the whole load and leave the panel showing a blank error.
   const loadBackupData = async (silent = false) => {
     if (!silent) setIsLoading(true);
-    try {
-      const [backupsRes, healthRes, scheduleRes] = await Promise.all([
-        api.getBackups(),
-        api.getBackupHealth(),
-        api.getBackupSchedule(),
-      ]);
+    let firstError: any = null;
 
-      if (backupsRes.success) setBackups(backupsRes.backups || []);
-      if (healthRes.success) setHealth(healthRes.health);
-      if (scheduleRes.success && scheduleRes.schedule) {
+    const safeLoad = async <T,>(fn: Promise<T>): Promise<T | null> => {
+      try {
+        return await fn;
+      } catch (err: any) {
+        console.error('[BackupManager] endpoint failed:', err?.message || err);
+        if (!firstError) firstError = err;
+        return null;
+      }
+    };
+
+    try {
+      const backupsRes = await safeLoad(api.getBackups());
+      const healthRes = await safeLoad(api.getBackupHealth());
+      const scheduleRes = await safeLoad(api.getBackupSchedule());
+
+      if (backupsRes?.success) setBackups(backupsRes.backups || []);
+      if (healthRes?.success) setHealth(healthRes.health);
+      if (scheduleRes?.success && scheduleRes.schedule) {
         setSchedule(scheduleRes.schedule);
         setScheduleForm(scheduleRes.schedule);
+      }
+
+      // Only surface a toast when the primary list call failed — partial data
+      // (health/schedule missing) degrades gracefully and is not actionable.
+      if (!backupsRes?.success && !silent) {
+        error(isRtl ? 'خطا در دریافت فهرست پشتیبان‌ها از سرور' : 'Failed to load backup list from server');
       }
     } catch (err: any) {
       console.error('Failed to load backup data:', err);

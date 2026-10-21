@@ -1,9 +1,26 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { X } from 'lucide-react';
 import { cn } from './Button';
 import { useTranslation } from '../../lib/i18n';
+
+// Modals can nest (e.g. creating a customer without leaving the originating
+// form). Only the topmost open modal may answer Escape, otherwise one keypress
+// closes the whole stack and the outer form's isOpen-gated reset wipes its draft.
+//
+// "Topmost" is read from the DOM rather than tracked in a module-level array:
+// this file can be instantiated more than once in a session (HMR, or a lazily
+// loaded chunk), and two copies would each keep their own stack — so a modal
+// would compare itself against an empty list and stop answering Escape at all.
+// DOM order is shared by every instance and matches what the user actually sees.
+const MODAL_LAYER_ATTR = 'data-modal-layer';
+
+function isTopmostOpenModal(el: HTMLElement | null): boolean {
+  if (!el || typeof document === 'undefined') return false;
+  const layers = document.querySelectorAll<HTMLElement>(`[${MODAL_LAYER_ATTR}]`);
+  return layers.length > 0 && layers[layers.length - 1] === el;
+}
 
 export interface ModalProps {
   isOpen: boolean;
@@ -12,8 +29,8 @@ export interface ModalProps {
   subtitle?: React.ReactNode;
   children: React.ReactNode;
   footer?: React.ReactNode;
-  maxWidth?: 'sm' | 'md' | 'lg' | 'xl' | '2xl' | '4xl' | 'full';
-  size?: 'sm' | 'md' | 'lg' | 'xl' | '2xl' | '4xl' | 'full';
+  maxWidth?: 'sm' | 'md' | 'lg' | 'xl' | '2xl' | '3xl' | '4xl' | '5xl' | 'full' | string;
+  size?: 'sm' | 'md' | 'lg' | 'xl' | '2xl' | '3xl' | '4xl' | '5xl' | 'full' | string;
   className?: string;
 }
 
@@ -30,16 +47,25 @@ export const Modal: React.FC<ModalProps> = ({
 }) => {
   const [mounted, setMounted] = useState(false);
   const { isRtl } = useTranslation();
-  const effectiveMaxWidth = size || maxWidth || 'lg';
+  const rawMax = size || maxWidth || 'lg';
 
   useEffect(() => {
     setMounted(true);
   }, []);
 
+  // Held in a ref so a parent re-render (new onClose identity) cannot re-run the
+  // effect and re-append this modal's token — that would make a background modal
+  // the "topmost" one and steal Escape from the modal actually on screen.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  const layerRef = useRef<HTMLDivElement | null>(null);
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isOpen) {
-        onClose();
+      // Only the topmost open modal responds, so a nested modal closes alone.
+      if (e.key === 'Escape' && isTopmostOpenModal(layerRef.current)) {
+        onCloseRef.current();
       }
     };
     if (isOpen) {
@@ -47,10 +73,17 @@ export const Modal: React.FC<ModalProps> = ({
       window.addEventListener('keydown', handleKeyDown);
     }
     return () => {
-      document.body.style.overflow = '';
+      // Check if any OTHER modal layer is still open/mounting.
+      // This layer is still mounted here (AnimatePresence keeps it for exit),
+      // so it must be excluded.
+      const others = [...document.querySelectorAll(`[${MODAL_LAYER_ATTR}]`)]
+        .filter((el) => el !== layerRef.current);
+      if (others.length === 0) {
+        document.body.style.overflow = '';
+      }
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [isOpen, onClose]);
+  }, [isOpen]);
 
   const maxWClasses = {
     sm: 'max-w-sm',
@@ -70,6 +103,8 @@ export const Modal: React.FC<ModalProps> = ({
     <AnimatePresence>
       {isOpen && (
         <div
+          ref={layerRef}
+          {...{ [MODAL_LAYER_ATTR]: '' }}
           className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 overflow-y-auto"
           dir={isRtl ? 'rtl' : 'ltr'}
         >
@@ -91,7 +126,7 @@ export const Modal: React.FC<ModalProps> = ({
             transition={{ type: 'spring', damping: 26, stiffness: 360 }}
             className={cn(
               'relative w-full rounded-2xl bg-surface border border-primary text-primary shadow-2xl z-10 flex flex-col max-h-[90vh] overflow-hidden my-auto',
-              maxWClasses[effectiveMaxWidth],
+              maxWClasses[rawMax],
               className
             )}
           >

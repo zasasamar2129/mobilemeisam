@@ -188,11 +188,17 @@ class SystemBackupService {
   // List all available backups on disk
   public listBackups(): BackupItem[] {
     try {
-      if (!fs.existsSync(this.backupDir)) return [];
+      console.log('[Backup Engine] Listing backups in:', this.backupDir);
+      if (!fs.existsSync(this.backupDir)) {
+        console.log('[Backup Engine] Directory does not exist:', this.backupDir);
+        return [];
+      }
       const files = fs.readdirSync(this.backupDir);
+      console.log('[Backup Engine] Found files:', files);
       const backupFiles = files.filter(
         (f) => f.startsWith('mmba_full_backup_') && f.endsWith('.json')
       );
+      console.log('[Backup Engine] Filtered backup files:', backupFiles);
 
       const items: BackupItem[] = [];
       for (const filename of backupFiles) {

@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { idbStorage } from '../../lib/idbStorage';
 import { compressIdCardImage } from '../../lib/imageCompressor';
+import { cleanDigits } from '../../lib/numberUtils';
 
 export interface RegisteredHoldersModalProps {
   isOpen: boolean;
@@ -23,18 +24,6 @@ export interface RegisteredHoldersModalProps {
   currentUser: User;
   onSelectHolderForFilter?: (holderId: string, holderName: string) => void;
 }
-
-// Persian / Arabic digits normalizer
-const normalizePersianNumbers = (val: string): string => {
-  if (!val) return '';
-  return val
-    .replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 1776))
-    .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 1632));
-};
-
-const cleanDigits = (val: string): string => {
-  return normalizePersianNumbers(val).replace(/[^0-9]/g, '');
-};
 
 const formatFileSize = (bytes?: number): string => {
   if (!bytes || bytes === 0) return '0 B';

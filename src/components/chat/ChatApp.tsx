@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { ChatConversation, ChatMessage, User, Attachment, ConversationType, UserRole } from '../../types';
 import { storage } from '../../services/storage';
 import { useTranslation } from '../../lib/i18n';
@@ -9,6 +9,9 @@ import { CreateGroupModal } from './CreateGroupModal';
 import { GroupInfoModal } from './GroupInfoModal';
 import { BroadcastModal } from './BroadcastModal';
 import { MessageCircle, Megaphone } from 'lucide-react';
+import { ChatStream, type ChatStreamEvent } from '../../services/chatStream';
+import { useToast } from '../ui/Toast';
+import { pushService } from '../../services/pushService';
 
 export interface ChatAppProps {
   conversations: (ChatConversation & { _unread?: number })[];
@@ -26,6 +29,7 @@ export const ChatApp: React.FC<ChatAppProps> = ({
   onRefresh,
 }) => {
   const { t, isRtl } = useTranslation();
+  const { info } = useToast();
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [isUserSearchOpen, setIsUserSearchOpen] = useState(false);
   const [isCreateGroupOpen, setIsCreateGroupOpen] = useState(false);
@@ -33,12 +37,17 @@ export const ChatApp: React.FC<ChatAppProps> = ({
   const [isBroadcastOpen, setIsBroadcastOpen] = useState(false);
   const [threadMessages, setThreadMessages] = useState<ChatMessage[]>([]);
   const [loadingThread, setLoadingThread] = useState(false);
+  const streamRef = useRef<any>(null);
+
+  const getAuthToken = (): string | null => {
+    try { return localStorage.getItem('mmba_auth_token') || null; } catch { return null; }
+  };
 
   const isAdmin = currentUser.role === UserRole.SUPER_ADMIN || currentUser.role === UserRole.OWNER || currentUser.role === UserRole.GOD || currentUser.role === UserRole.SUPERVISOR;
 
   const activeConversation = conversations.find((c) => c.id === activeConversationId) || null;
 
-  const dirName = (c: ChatConversation) => {
+  const dirName = useCallback((c: ChatConversation) => {
     if (c.type === ConversationType.GROUP || c.type === 'GROUP') {
       return c.title || (isRtl ? 'گروه بدون نام' : 'Unnamed Group');
     }
@@ -47,12 +56,12 @@ export const ChatApp: React.FC<ChatAppProps> = ({
     const uid = (c.member_ids || []).find((id) => id !== currentUser.id);
     const u = allUsers.find((x) => x.id === uid);
     return u?.name || c.title || (isRtl ? 'گفتگو' : 'Conversation');
-  };
+  }, [currentUser.id, allUsers, isRtl]);
 
-  const isPinned = (c: ChatConversation): boolean => {
+  const isPinned = useCallback((c: ChatConversation): boolean => {
     const pins = c.pinned_by_user_ids || c.pinnedByUserIds || [];
     return pins.includes(currentUser.id);
-  };
+  }, [currentUser.id]);
 
   const reloadThread = useCallback(() => {
     if (!activeConversationId) return;
@@ -71,6 +80,42 @@ export const ChatApp: React.FC<ChatAppProps> = ({
     reloadThread();
     setLoadingThread(false);
   }, [activeConversationId, reloadThread]);
+
+  // Open/close stream on active conversation change
+  useEffect(() => {
+    if (streamRef.current) streamRef.current.close();
+    if (!activeConversationId) return;
+
+    const stream = new ChatStream(activeConversationId, getAuthToken(), (event: ChatStreamEvent) => {
+      switch (event.type) {
+        case 'message':
+          if (event.message) storage.applyLiveChatMessage(activeConversationId, event.message as ChatMessage);
+          if (event.userId !== currentUser.id) {
+            pushService.playNotificationSound('crystal');
+            if (activeConversationId !== event.conversationId) info(t('chat.new_message') || 'New message');
+          }
+          break;
+        case 'edited':
+          if (event.messageId && event.payload?.message) storage.applyLiveMessageEdit(activeConversationId, event.messageId, (event.payload.message as any).body);
+          break;
+        case 'deleted':
+          if (event.messageId) storage.applyLiveMessageDelete(activeConversationId, event.messageId, event.payload?.reason as string);
+          break;
+        case 'reaction':
+          if (event.message) storage.applyLiveMessageReaction(activeConversationId, event.message as ChatMessage);
+          break;
+        case 'read':
+          if (event.userId) storage.applyLiveConversationRead(activeConversationId, event.userId);
+          break;
+        case 'typing':
+          if (event.userId && typeof event.isTyping === 'boolean') storage.applyLiveTyping(activeConversationId, event.userId, event.isTyping);
+          break;
+      }
+      reloadThread();
+    });
+    streamRef.current = stream.connect();
+    return () => streamRef.current?.close();
+  }, [activeConversationId, currentUser.id, t, reloadThread]);
 
   const handleSelectConversation = (id: string) => {
     setActiveConversationId(id);
@@ -135,6 +180,18 @@ export const ChatApp: React.FC<ChatAppProps> = ({
       reloadThread();
       onRefresh();
     });
+  };
+
+  const handleReact = (messageId: string, emoji: string) => {
+    if (!activeConversationId) return;
+    storage.toggleChatMessageReaction(activeConversationId, messageId, emoji).then(() => {
+      reloadThread();
+    });
+  };
+
+  const handleTypingChange = (isTyping: boolean) => {
+    if (!activeConversationId) return;
+    storage.setChatTyping(activeConversationId, isTyping);
   };
 
   const handleAddGroupMember = (userId: string) => {
@@ -229,6 +286,8 @@ export const ChatApp: React.FC<ChatAppProps> = ({
                 onEditMessage={handleEditMessage}
                 onDeleteMessage={handleDeleteMessage}
                 onAttachDocument={handleAttachDocument}
+                onReact={handleReact}
+                onTypingChange={handleTypingChange}
                 onMarkRead={() => storage.markChatConversationRead(activeConversation.id)}
                 onOpenGroupInfo={() => setIsGroupInfoOpen(true)}
                 onTogglePin={() => handleTogglePin(activeConversation.id)}

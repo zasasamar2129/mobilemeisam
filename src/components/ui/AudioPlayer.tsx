@@ -6,6 +6,7 @@ import { useTranslation } from '../../lib/i18n';
 
 export interface AudioPlayerProps {
   src: string;
+  audioUrl?: string; // alias
   duration?: number; // fallback duration in seconds if known
   title?: string;
   className?: string;

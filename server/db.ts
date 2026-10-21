@@ -13,7 +13,8 @@ import {
   ChatConversation, ChatMessage, ConversationType, ChatMemberRole, MessageStatus,
   ConversationPriority, Broadcast, BroadcastStatus, BroadcastRecipient, BroadcastRecipientStatus, MessageAttachment,
   ConversationMember, SimPurchase, SimPurchasePayment, SimPurchaseReturn, SimSalePayment,
-  SimSaleReturn, SimCostItem, SimPurchaseStatus, SimPaymentMethod, SimReturnInventoryStatus
+  SimSaleReturn, SimCostItem, SimPurchaseStatus, SimPaymentMethod, SimReturnInventoryStatus, SimStatus,
+  Consignment, ConsignmentPayment
 } from '../src/types';
 import { computeSimFinancial, getCurrentPurchase, computePurchaseRemainingReturnable, deriveTimelineItems } from '../src/lib/simFinancial';
 import { DEFAULT_ROLES } from '../src/lib/permissions';
@@ -96,6 +97,12 @@ export interface CentralDatabaseSchema {
     geminiApiKey?: string;
     systemPrompt?: string;
     maintenanceMode?: boolean;
+    wordpressSync?: {
+      enabled: boolean;
+      apiUrl: string;
+      syncSecret: string;
+      timeoutMs: number;
+    };
     updatedAt: string;
   };
 }
@@ -160,6 +167,15 @@ export function normalizePhone(raw: string | undefined | null): string {
     str = '0' + str.substring(4);
   }
   return str;
+}
+
+/** Lead source is free text (not an enum), so it is only normalised, never restricted. */
+export const LEAD_SOURCE_MAX_LENGTH = 120;
+
+export function normalizeLeadSource(raw?: string | null): string | undefined {
+  const value = (raw || '').replace(/\s+/g, ' ').trim();
+  if (!value) return undefined;
+  return value.slice(0, LEAD_SOURCE_MAX_LENGTH);
 }
 
 // Merge persisted roles with the latest DEFAULT_ROLES definitions so newly added
@@ -332,6 +348,7 @@ class CentralDatabase {
         ...u,
         id: finalId,
         username: normUsername || u.username,
+        createdAt: u.createdAt || new Date().toISOString(),
       };
 
       if (normUsername) seenUsernames.add(normUsername);
@@ -675,6 +692,8 @@ class CentralDatabase {
   public getLeads(filter?: {
     status?: string;
     query?: string;
+    creatorId?: string;
+    sortBy?: 'newest' | 'oldest' | 'code';
   }): Lead[] {
     const db = this.getState();
     let list = Array.isArray(db.leads) ? [...db.leads] : [];
@@ -684,6 +703,9 @@ class CentralDatabase {
     if (filter.status && filter.status !== 'ALL') {
       list = list.filter((l) => l.status === filter.status);
     }
+    if (filter.creatorId) {
+      list = list.filter((l) => l.createdById === filter.creatorId);
+    }
     if (filter.query) {
       const q = filter.query.trim().toLowerCase();
       const qNorm = normalizePhone(q);
@@ -692,11 +714,17 @@ class CentralDatabase {
         const matchCode = l.leadCode && l.leadCode.toLowerCase().includes(q);
         const matchMobile = l.mobile && (l.mobile.includes(q) || (qNorm && normalizePhone(l.mobile).includes(qNorm)));
         const matchNotes = l.notes && l.notes.toLowerCase().includes(q);
-        return matchName || matchCode || matchMobile || matchNotes;
+        const matchCreator = l.createdByUserName && l.createdByUserName.toLowerCase().includes(q);
+        return matchName || matchCode || matchMobile || matchNotes || matchCreator;
       });
     }
 
-    return list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    const sort = filter.sortBy || 'newest';
+    return list.sort((a, b) => {
+      if (sort === 'oldest') return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      if (sort === 'code') return (a.leadCode || '').localeCompare(b.leadCode || '');
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    });
   }
 
   public findLeadById(id: string): Lead | undefined {
@@ -723,10 +751,20 @@ class CentralDatabase {
 
       if (existingIdx >= 0) {
         const current = db.leads[existingIdx];
+        // createdById is immutable: preserve the original creator even on updates
+        // (§5 — creator must never change on reassignment; assignment is separate).
+        const preservedCreator = current.createdById || lead.createdById;
         const updated: Lead = {
           ...current,
           ...lead,
           mobile: normMobile || current.mobile,
+          // Source is free text: normalise whitespace and cap the length, but
+          // never force it into a fixed set of options.
+          source: normalizeLeadSource(lead.source) ?? current.source,
+          // تاریخ ثبت اولیه is immutable: ordinary edits must never reset it.
+          registrationDate: current.registrationDate || lead.registrationDate || now,
+          createdById: preservedCreator,
+          createdByUserName: current.createdByUserName || lead.createdByUserName,
           updatedAt: now,
         };
         db.leads[existingIdx] = updated;
@@ -740,11 +778,14 @@ class CentralDatabase {
           mobile: normMobile,
           name: lead.name || '',
           status: lead.status || LeadStatus.NEW_LEAD,
-          source: lead.source || 'تماس ورودی',
+          source: normalizeLeadSource(lead.source) || 'تماس ورودی',
           notes: lead.notes || '',
+          createdById: lead.createdById,
+          createdByUserName: lead.createdByUserName,
           assignedUserId: lead.assignedUserId,
           assignedUserName: lead.assignedUserName,
           createdAt: lead.createdAt || now,
+          registrationDate: lead.registrationDate || now,
           updatedAt: now,
           interactionCount: lead.interactionCount || 0,
         };
@@ -809,6 +850,7 @@ class CentralDatabase {
           leadStage: 'WON',
           leadId: lead.id,
           leadCode: lead.leadCode,
+          source: (customerData.source || lead.source || '').trim() || undefined,
           createdAt: now,
           updatedAt: now,
         };
@@ -1395,8 +1437,21 @@ class CentralDatabase {
       const now = new Date().toISOString();
       const existingIdx = db.sims.findIndex((s) => s.id === sim.id);
       if (existingIdx >= 0) {
-        db.sims[existingIdx] = { ...db.sims[existingIdx], ...sim, updatedAt: now };
-        return db.sims[existingIdx];
+        const existing = db.sims[existingIdx];
+        const merged: SimCard = { ...existing, ...sim, updatedAt: now };
+
+        // A sale date means "the sale was finalised". It is therefore set the
+        // first time the SIM reaches SOLD (retries keep the original value) and
+        // cleared again whenever the SIM leaves SOLD, so a cancelled or
+        // reversed sale is never presented as a completed one.
+        if (merged.status === SimStatus.SOLD) {
+          if (!merged.saleDate) merged.saleDate = now;
+        } else {
+          merged.saleDate = undefined;
+        }
+
+        db.sims[existingIdx] = merged;
+        return merged;
       } else {
         const newSim: SimCard = {
           ...sim,
@@ -1404,6 +1459,7 @@ class CentralDatabase {
           createdAt: sim.createdAt || now,
           updatedAt: now,
         };
+        if (newSim.status === SimStatus.SOLD && !newSim.saleDate) newSim.saleDate = now;
         db.sims.unshift(newSim);
         return newSim;
       }
@@ -1742,6 +1798,21 @@ class CentralDatabase {
     });
   }
 
+  public getAuditLogs(filter?: { targetId?: string; targetType?: string; limit?: number }): AuditLog[] {
+    const db = this.getState();
+    let list = Array.isArray(db.auditLogs) ? [...db.auditLogs] : [];
+    if (filter?.targetId) {
+      list = list.filter((l) => l.targetId === filter.targetId);
+    }
+    if (filter?.targetType) {
+      list = list.filter((l) => l.targetType === filter.targetType);
+    }
+    if (filter?.limit && filter.limit > 0) {
+      list = list.slice(0, filter.limit);
+    }
+    return list;
+  }
+
   // Problem Reports
   public async saveProblemReport(report: ProblemReport): Promise<ProblemReport> {
     return this.mutate((db) => {
@@ -1785,6 +1856,21 @@ class CentralDatabase {
         updatedAt: new Date().toISOString(),
       };
       return db.settings;
+    });
+  }
+
+  public getWordpressSyncSettings(): CentralDatabaseSchema['settings']['wordpressSync'] {
+    return this.getState().settings.wordpressSync;
+  }
+
+  public async saveWordpressSyncSettings(data: CentralDatabaseSchema['settings']['wordpressSync']): Promise<CentralDatabaseSchema['settings']['wordpressSync']> {
+    return this.mutate((db) => {
+      db.settings = {
+        ...db.settings,
+        wordpressSync: data,
+        updatedAt: new Date().toISOString(),
+      };
+      return db.settings.wordpressSync;
     });
   }
 
@@ -2201,16 +2287,83 @@ class CentralDatabase {
       member.last_read_at = new Date().toISOString();
       member.lastReadAt = new Date().toISOString();
       const msgs = (db.chatMessages || []).filter((m) => m.conversation_id === conversationId || m.conversationId === conversationId);
+      // Every other member must have read it before it counts as READ. The reader is
+      // never the sender, so a recipient marking the conversation read is exactly the
+      // signal that flips SENT -> READ. Previously own messages were skipped, which
+      // made the double checkmark unreachable.
+      const requiredReaders = Math.max(1, (convo.member_ids || []).length - 1);
       msgs.forEach((m) => {
         if (m.sender_user_id === userId) return;
         const rb = m.read_by_user_ids || [];
         if (!rb.includes(userId)) rb.push(userId);
-        if (rb.length >= ((convo.member_ids || []).length - 1)) {
+        m.read_by_user_ids = rb;
+        m.readByUserIds = rb;
+        if (rb.length >= requiredReaders) {
           m.status = MessageStatus.READ;
           m.read_at = new Date().toISOString();
+          m.readAt = m.read_at;
         }
       });
       return convo;
+    });
+  }
+
+  /** Mark a member as typing. `isTyping: false` clears it; stale entries are
+   *  swept by `sweepStaleTyping` so a dropped client can't show a stuck indicator. */
+  public async setConversationTyping(
+    conversationId: string,
+    userId: string,
+    isTyping: boolean
+  ): Promise<ChatConversation | undefined> {
+    return this.mutate((db) => {
+      const convo = db.conversations.find((c) => c.id === conversationId);
+      if (!convo) return undefined;
+      const member = (convo.members || []).find((m) => m.user_id === userId);
+      if (!member) return convo;
+      const now = new Date().toISOString();
+      member.is_typing = isTyping;
+      member.isTyping = isTyping;
+      member.typing_at = isTyping ? now : undefined;
+      member.typingAt = member.typing_at;
+      return convo;
+    });
+  }
+
+  /** Clear typing flags older than the given age. Called opportunistically on read. */
+  public sweepStaleTyping(maxAgeMs = 8000): void {
+    const cutoff = Date.now() - maxAgeMs;
+    const stale = this.getState().conversations.some((c) =>
+      (c.members || []).some((m) => m.is_typing && m.typing_at && new Date(m.typing_at).getTime() < cutoff)
+    );
+    if (!stale) return;
+    this.mutate((db) => {
+      db.conversations.forEach((c) => {
+        (c.members || []).forEach((m) => {
+          if (m.is_typing && m.typing_at && new Date(m.typing_at).getTime() < cutoff) {
+            m.is_typing = false;
+            m.isTyping = false;
+            m.typing_at = undefined;
+            m.typingAt = undefined;
+          }
+        });
+      });
+    });
+  }
+
+  /** Presence heartbeat. Called on login and on the sync poll. */
+  public async setUserPresence(
+    userId: string,
+    isOnline: boolean
+  ): Promise<User | undefined> {
+    return this.mutate((db) => {
+      const user = db.users.find((u) => u.id === userId);
+      if (!user) return undefined;
+      const now = new Date().toISOString();
+      user.is_online = isOnline;
+      user.isOnline = isOnline;
+      user.last_seen_at = now;
+      user.lastSeenAt = now;
+      return user;
     });
   }
 
@@ -2451,6 +2604,32 @@ class CentralDatabase {
       msg.is_edited = true;
       msg.edited_at = now;
       msg.editedAt = now;
+      msg.updated_at = now;
+      msg.updatedAt = now;
+      return msg;
+    });
+  }
+
+  public async toggleChatMessageReaction(
+    messageId: string,
+    userId: string,
+    userName: string,
+    emoji: string
+  ): Promise<ChatMessage | undefined> {
+    return this.mutate((db) => {
+      const msg = (db.chatMessages || []).find((m) => m.id === messageId);
+      if (!msg) return undefined;
+      const now = new Date().toISOString();
+      const existing = msg.reactions || [];
+      const hasReacted = existing.some((r) => (r.user_id === userId || r.userId === userId) && r.emoji === emoji);
+      if (hasReacted) {
+        msg.reactions = existing.filter((r) => !((r.user_id === userId || r.userId === userId) && r.emoji === emoji));
+      } else {
+        msg.reactions = [
+          ...existing,
+          { emoji, user_id: userId, userId, user_name: userName, userName, created_at: now, createdAt: now }
+        ];
+      }
       msg.updated_at = now;
       msg.updatedAt = now;
       return msg;
@@ -2789,11 +2968,41 @@ class CentralDatabase {
         id: purchase.id || `spur-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
         purchasePrice: price,
         currency: purchase.currency || 'IRT',
+        // The purchase date is recorded when the purchase is confirmed; an
+        // omitted date falls back to "now" rather than inventing history.
+        purchaseDate: purchase.purchaseDate || now,
         paymentStatus: SimPurchaseStatus.UNPAID,
         createdAt: now,
         updatedAt: now,
       };
       db.simPurchases.push(newPurchase);
+
+      // Mirror the authoritative purchase date onto the SIM row once, so the
+      // list/detail views read the same value.
+      const simRow = (db.sims || []).find((s) => s.id === newPurchase.simId);
+      if (simRow) {
+        let touched = false;
+        if (!simRow.purchaseDate) {
+          simRow.purchaseDate = newPurchase.purchaseDate;
+          simRow.purchasePrice = newPurchase.purchasePrice;
+          touched = true;
+        }
+        // The eligibility base is the PREVIOUS ownership transfer, captured at
+        // purchase time. First authoritative value wins — a later retry or a
+        // re-import must never silently move the date the 20-day wait runs from.
+        if (newPurchase.previousTransferDate && !simRow.previousTransferDate) {
+          simRow.previousTransferDate = newPurchase.previousTransferDate;
+          touched = true;
+        }
+        // The manual follow-up due date is the operator's choice, taken verbatim
+        // from the purchase form. Only filled when empty: re-purchasing or a
+        // later edit must not overwrite a date the operator has since set.
+        if (newPurchase.deedTransferDueDate && !simRow.deedTransferDueDate) {
+          simRow.deedTransferDueDate = newPurchase.deedTransferDueDate;
+          touched = true;
+        }
+        if (touched) simRow.updatedAt = now;
+      }
       return newPurchase;
     });
   }
@@ -3177,3 +3386,6 @@ class CentralDatabase {
 }
 
 export const centralDb = new CentralDatabase();
+
+
+// ===== Sprint 04 Consignment Lifecycle (§4) =====

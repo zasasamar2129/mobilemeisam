@@ -21,6 +21,7 @@ export interface ContractInstallmentsModalProps {
   onClose: () => void;
   contract: Contract | null;
   currentUser: User;
+  onInstallmentsUpdated?: () => void;
 }
 
 export const ContractInstallmentsModal: React.FC<ContractInstallmentsModalProps> = ({

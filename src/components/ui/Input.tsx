@@ -1,18 +1,26 @@
 import React from 'react';
 import { cn } from './Button';
 
-export interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
+export interface InputProps extends Omit<React.InputHTMLAttributes<HTMLInputElement>, 'size'> {
   label?: string;
   error?: string;
   helperText?: string;
   leftIcon?: React.ReactNode;
   rightIcon?: React.ReactNode;
   isRequired?: boolean;
+  size?: 'sm' | 'md' | 'lg';
 }
 
 export const Input = React.forwardRef<HTMLInputElement, InputProps>(
-  ({ className, label, error, helperText, leftIcon, rightIcon, isRequired, id, ...props }, ref) => {
+  ({ className, label, error, helperText, leftIcon, rightIcon, isRequired, id, size, ...props }, ref) => {
     const inputId = id || (label ? `input-${label.replace(/\s+/g, '-').toLowerCase()}` : undefined);
+
+    const sizeClasses: Record<string, string> = {
+      sm: 'px-3 py-2 text-xs',
+      md: 'px-3.5 py-2.5 text-sm',
+      lg: 'px-4 py-3 text-base',
+    };
+    const sizeClass = sizeClasses[size || 'md'];
 
     return (
       <div className="w-full space-y-1.5 text-right">
@@ -32,7 +40,8 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(
             id={inputId}
             ref={ref}
             className={cn(
-              'w-full rounded-xl bg-surface/80 border border-primary/80 text-primary text-sm px-3.5 py-2.5 transition-all duration-200 placeholder:text-muted dark:placeholder:text-muted focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:bg-surface-subtle dark:disabled:bg-slate-950',
+              'w-full rounded-xl bg-surface/80 border border-primary/80 text-primary transition-all duration-200 placeholder:text-muted dark:placeholder:text-muted focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:opacity-50 disabled:bg-surface-subtle dark:disabled:bg-slate-950',
+              sizeClass,
               leftIcon ? 'pl-10' : '',
               rightIcon ? 'pr-10' : '',
               error ? 'border-rose-500 focus:border-rose-500 focus:ring-rose-500/20' : '',

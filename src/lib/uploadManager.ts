@@ -87,6 +87,14 @@ export class UploadManager {
     this.listeners.forEach((l) => l.onChange?.(item));
   }
 
+  private isRetryableError(err: any): boolean {
+    return err.status === 0 || err.status === 408 || err.status === 429 || err.status >= 500;
+  }
+
+  private async delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
   private mark(item: UploadItem, patch: Partial<UploadItem>): UploadItem {
     const next = { ...item, ...patch };
     this.notify(next);
@@ -201,15 +209,30 @@ export class UploadManager {
     };
 
     try {
-      // Phase: UPLOADED — server-confirmed HTTP request with REAL network progress.
-      const res = await apiClient.uploadAttachment(
-        attachment,
-        (pct) => {
-          // Progress maps to the transfer only; never claim 100% before the
-          // response comes back (§4). Guard 100 so "0–99 = transferring".
-          this.mark(item, { phase: 'UPLOADING', progress: Math.min(pct, 99) });
+      // Phase: UPLOADED — server-confirmed HTTP request with REAL network progress (with retry).
+      let res: any;
+      let attempt = 1;
+      const maxAttempts = 3;
+      while (true) {
+        try {
+          res = await apiClient.uploadAttachment(
+            attachment,
+            (pct) => {
+              this.mark(item, { phase: 'UPLOADING', progress: Math.min(pct, 99) });
+            }
+          );
+          break;
+        } catch (err: any) {
+          if (attempt < maxAttempts && this.isRetryableError(err) && item.phase !== 'CANCELLED') {
+            attempt++;
+            const backoff = Math.min(1000 * Math.pow(2, attempt - 2), 10000);
+            this.mark(item, { phase: 'UPLOADING', error: `تلاش مجدد (${attempt}/${maxAttempts})...` });
+            await this.delay(backoff);
+            continue;
+          }
+          throw err;
         }
-      );
+      }
       const confirmedId = res?.attachment?.id || attachment.id || input.id;
       if (!confirmedId) {
         const f = this.mark(item, { phase: 'FAILED', canRetry: true, error: 'سرور شناسه سند را برنگرداند / server returned no document id' });
@@ -317,6 +340,8 @@ function renderableType(fileType: string, fileName: string): string {
   const map: Record<string, string> = {
     jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp',
     heic: 'image/heic', heif: 'image/heif', pdf: 'application/pdf', gif: 'image/gif',
+    avif: 'image/avif', bmp: 'image/bmp', tiff: 'image/tiff', tif: 'image/tiff',
+    svg: 'image/svg+xml'
   };
   return map[ext] || 'application/octet-stream';
 }

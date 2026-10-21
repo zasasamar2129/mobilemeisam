@@ -13,6 +13,7 @@ import {
   Bookmark, CheckCircle2, XCircle, ArrowRightLeft, DollarSign,
   Calendar, UserCheck, ShieldCheck, Tag, ShoppingCart, Lock, Handshake
 } from 'lucide-react';
+import { useCustomerCreationHandoff, CUSTOMER_CREATE_VALUE, CUSTOMER_CREATE_LABEL } from '../customers/useCustomerCreationHandoff';
 
 export type LifecycleMode = 'RESERVE' | 'CANCEL_RESERVE' | 'SELL' | 'MORTGAGE' | 'CONSIGNMENT';
 
@@ -79,6 +80,23 @@ export const SimLifecycleModal: React.FC<SimLifecycleModalProps> = ({
   const [consResponsibleUserId, setConsResponsibleUserId] = useState('');
   const [consExpiryAt, setConsExpiryAt] = useState('');
   const [consNotes, setConsNotes] = useState('');
+
+  // "Create customer" handoff — the reservation/sale/consignment form stays
+  // mounted underneath, so its draft survives the round-trip.
+  const customerHandoff = useCustomerCreationHandoff();
+
+  /** Apply a freshly created customer to whichever selector opened the modal. */
+  const applyNewCustomer = (slot: 'RESERVE' | 'SELL' | 'CONSIGNMENT') => (cust: Customer) => {
+    if (slot === 'RESERVE') {
+      setSelectedCustomerId(cust.id);
+    } else if (slot === 'SELL') {
+      setSaleCustomerId(cust.id);
+      setBuyerMobile(cust.phone || '');
+      setBuyerNationalId(cust.nationalId || '');
+    } else {
+      setConsOwnerCustomerId(cust.id);
+    }
+  };
 
   useEffect(() => {
     if (sim && isOpen) {
@@ -299,6 +317,7 @@ export const SimLifecycleModal: React.FC<SimLifecycleModalProps> = ({
   };
 
   return (
+    <>
     <Modal
       isOpen={isOpen}
       onClose={onClose}
@@ -336,9 +355,16 @@ export const SimLifecycleModal: React.FC<SimLifecycleModalProps> = ({
               <Select
                 label="مشتری رزروکننده"
                 value={selectedCustomerId}
-                onChange={(e) => setSelectedCustomerId(e.target.value)}
+                onChange={(e) => {
+                  if (e.target.value === CUSTOMER_CREATE_VALUE) {
+                    customerHandoff.open(applyNewCustomer('RESERVE'));
+                  } else {
+                    setSelectedCustomerId(e.target.value);
+                  }
+                }}
                 isRequired
               >
+                <option value={CUSTOMER_CREATE_VALUE}>{CUSTOMER_CREATE_LABEL}</option>
                 <option value="">-- انتخاب مشتری --</option>
                 {(customers || []).map((c) => (
                   <option key={c.id} value={c.id}>{c.name} ({c.phone || ''})</option>
@@ -418,6 +444,10 @@ export const SimLifecycleModal: React.FC<SimLifecycleModalProps> = ({
                 label="مشتری خریدار"
                 value={saleCustomerId}
                 onChange={(e) => {
+                  if (e.target.value === CUSTOMER_CREATE_VALUE) {
+                    customerHandoff.open(applyNewCustomer('SELL'));
+                    return;
+                  }
                   setSaleCustomerId(e.target.value);
                   const cust = (customers || []).find((c) => c.id === e.target.value);
                   if (cust) {
@@ -427,6 +457,7 @@ export const SimLifecycleModal: React.FC<SimLifecycleModalProps> = ({
                 }}
                 isRequired
               >
+                <option value={CUSTOMER_CREATE_VALUE}>{CUSTOMER_CREATE_LABEL}</option>
                 <option value="">-- انتخاب خریدار --</option>
                 {(customers || []).map((c) => (
                   <option key={c.id} value={c.id}>{c.name} ({c.phone || ''})</option>
@@ -561,9 +592,16 @@ export const SimLifecycleModal: React.FC<SimLifecycleModalProps> = ({
               <Select
                 label="مالک / مشتری صاحب سیم‌کارت"
                 value={consOwnerCustomerId}
-                onChange={(e) => setConsOwnerCustomerId(e.target.value)}
+                onChange={(e) => {
+                  if (e.target.value === CUSTOMER_CREATE_VALUE) {
+                    customerHandoff.open(applyNewCustomer('CONSIGNMENT'));
+                  } else {
+                    setConsOwnerCustomerId(e.target.value);
+                  }
+                }}
                 isRequired
               >
+                <option value={CUSTOMER_CREATE_VALUE}>{CUSTOMER_CREATE_LABEL}</option>
                 <option value="">-- انتخاب مالک از مشتریان سیستم --</option>
                 {(customers || []).map((c) => (
                   <option key={c.id} value={c.id}>{c.name} ({c.phone || ''})</option>
@@ -666,5 +704,7 @@ export const SimLifecycleModal: React.FC<SimLifecycleModalProps> = ({
         )}
       </div>
     </Modal>
+      {customerHandoff.modal}
+    </>
   );
 };

@@ -1,8 +1,10 @@
 import { Router, Request, Response } from 'express';
 import { centralDb, normalizePhone } from './db';
+import * as consignmentDb from './consignmentDb';
 import { backupService } from './backupService';
 import { webPushService } from './webPushService';
 import { notificationScheduler } from './notificationScheduler';
+import { eventBus, type ChatEvent, type ChatEventType } from './eventBus';
 import {
   User, UserRole, UserStatus, ModuleName, Customer, Call, Task,
   Contract, Payment, Check, SimCard, Repair, Attachment, Notification,
@@ -11,12 +13,87 @@ import {
   Account, JournalEntry, AccountingPeriod, DocumentShare,
   SimPurchase, SimPurchasePayment, SimPurchaseReturn, SimSalePayment, SimSaleReturn, SimCostItem
 } from '../src/types';
-import { isAdmin } from '../src/lib/permissions';
+import { isAdmin, isGod, canViewTask, canViewAllTasks } from '../src/lib/permissions';
+import {
+  validateDeedTransferDueDate,
+  validateDeedTransferCompletion,
+  computeDeedTransferEligibility,
+  computeDeedFollowStatus,
+  MAX_DEED_TRANSFER_DAYS,
+} from '../src/lib/deedTransfer';
 
 export const apiRouter = Router();
 
+/**
+ * Publish a chat mutation to every live SSE stream watching this conversation.
+ * Fire-and-forget: the REST response must not wait on fan-out, and the in-app
+ * notification + web push are dispatched separately (see notifyChatRecipients).
+ */
+function publishChat(conversationId: string, type: ChatEventType, userId: string, userName: string, payload: Record<string, unknown> = {}) {
+  eventBus.publish({
+    type,
+    conversationId,
+    userId,
+    userName,
+    payload,
+    revision: centralDb.getRevisionInfo().revision,
+  });
+}
+
+/**
+ * Notify everyone but the sender about a new chat message: in-app record plus
+ * web push for the devices that are currently backgrounded or offline. This is
+ * the only channel that survives a hidden tab, so it is what makes chat work
+ * "even when the app is closed" — while the app is open, SSE delivers faster.
+ *
+ * Fire-and-forget on purpose: the caller's response must not wait on push.
+ */
+function notifyChatRecipients(conversation: any, sender: User, body: string, messageId: string) {
+  const members = (conversation.member_ids || []) as string[];
+  const recipientIds = members.filter((mid) => mid !== sender.id);
+  if (recipientIds.length === 0) return;
+
+  const preview = (body || '').trim().slice(0, 160) || (sender.name ? `${sender.name}` : 'پیام جدید');
+  const url = `/?module=CHAT&conversationId=${encodeURIComponent(conversation.id)}`;
+
+  for (const recipientId of recipientIds) {
+    // In-app notification — always, so the bell works even without a device.
+    centralDb.saveNotification({
+      id: `notif-chat-${Date.now()}-${recipientId}`,
+      userId: recipientId,
+      title: sender.name,
+      message: preview,
+      category: 'CHAT',
+      severity: 'INFO',
+      priority: 'HIGH',
+      read: false,
+      createdAt: new Date().toISOString(),
+      relatedEntityType: 'CONVERSATION',
+      relatedEntityId: conversation.id,
+      relatedCustomerName: conversation.title || undefined,
+    }).catch((err) => console.warn('[Chat] in-app notify failed:', err));
+
+    // Web push — only reaches backgrounded/offline tabs; the scheduler handles
+    // quiet hours, expired subscriptions and delivery logging.
+    notificationScheduler.dispatchToUser(recipientId, {
+      id: `notif-chat-push-${Date.now()}-${recipientId}`,
+      userId: recipientId,
+      title: sender.name,
+      message: preview,
+      body: preview,
+      category: 'CHAT',
+      priority: 'HIGH',
+      read: false,
+      createdAt: new Date().toISOString(),
+      relatedEntityType: 'CONVERSATION',
+      relatedEntityId: conversation.id,
+      relatedCustomerName: conversation.title || undefined,
+    }).catch((err) => console.warn('[Chat] push dispatch failed:', err));
+  }
+}
+
 // Middleware: Extract user from Authorization Header or query parameter
-function getAuthUser(req: Request): User | undefined {
+export function getAuthUser(req: Request): User | undefined {
   let token = '';
   const authHeader = req.headers.authorization;
   if (authHeader) {
@@ -33,6 +110,197 @@ function getAuthUser(req: Request): User | undefined {
     return user;
   }
   return undefined;
+}
+
+/**
+ * Task visibility for the central sync payload, matching `GET /tasks`.
+ * The client reads tasks from `/sync/all`, so without this the management-view
+ * fix is cosmetic — every caller would still receive the whole table.
+ */
+function visibleTasksFor(user: User | undefined): Task[] {
+  const tasks = centralDb.getState().tasks;
+  if (!user) return [];
+  return canViewAllTasks(user) ? tasks : tasks.filter((task) => canViewTask(user, task));
+}
+
+/**
+ * The eligible assignees for the Task Inbox's employee grouping control, scoped
+ * to the caller's authorized management view.
+ *
+ * Built from the real user table — never a hardcoded list. A non-manager gets an
+ * empty list rather than a directory of colleagues, so the grouping control
+ * cannot become an information leak for ordinary employees. Deactivated and
+ * suspended accounts are omitted from the *options* but are still reported in
+ * the caller's task data, so historical tasks never silently disappear.
+ */
+function eligibleAssigneesFor(user: User | undefined): { id: string; name: string }[] {
+  if (!user || !canViewAllTasks(user)) return [];
+  return centralDb
+    .getState()
+    .users.filter((u) => u.status !== UserStatus.INACTIVE && u.status !== UserStatus.SUSPENDED)
+    .map((u) => ({ id: u.id, name: u.name || u.username || u.id }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'fa'));
+}
+
+/**
+ * Applies an employee scope to a task list the caller is already allowed to see.
+ *
+ * The scope is applied ON TOP of `canViewTask`, never instead of it: an employee
+ * who passes `assigneeId` for a colleague still receives nothing, because the
+ * permission filter has already removed those rows. `UNASSIGNED` selects the
+ * tasks with no assignee — visible only where the caller's scope already covers
+ * them.
+ */
+function applyAssigneeScope(tasks: Task[], assigneeId: string | undefined): Task[] {
+  if (!assigneeId) return tasks;
+  if (assigneeId === 'UNASSIGNED') return tasks.filter((t) => !t.assignedUserId);
+  return tasks.filter((t) => t.assignedUserId === assigneeId);
+}
+
+/**
+ * Single entry point for the ownership-transfer data on every write path — the
+ * SIM routes, the purchase route and the batch sync push.
+ *
+ * The operator's manual due date is authoritative and is stored exactly as
+ * sent: it is never calculated, never overwritten from the purchase date and
+ * never clamped to the 20-day window, because different SIMs legitimately carry
+ * different operational due dates. The calculated eligibility date is only
+ * compared against it, and a mismatch produces a warning the caller surfaces —
+ * not a refusal, and never a silent rewrite.
+ */
+function applyDeedTransferRule(
+  sim: Partial<SimCard>,
+  user: User | undefined,
+  existing?: SimCard
+): { sim: Partial<SimCard>; error?: string; warnings: string[]; auditOverride?: string } {
+  const merged = { ...existing, ...sim } as SimCard;
+  const priorOverride = existing?.deedTransferOverride;
+  const warnings: string[] = [];
+
+  // "Unset" must be one state, not three. A cleared date is sent as null (an
+  // omitted key means "leave it alone", which the spread above already handles).
+  // Normalise here so the stored record never carries an empty string, and so a
+  // cleared due date genuinely clears instead of being silently kept.
+  for (const key of ['deedTransferDueDate', 'previousTransferDate'] as const) {
+    const value = merged[key] as unknown;
+    if (value === null || (typeof value === 'string' && value.trim() === '')) {
+      (merged as unknown as Record<string, unknown>)[key] = undefined;
+    }
+  }
+
+  // A malformed due date is the only fatal case. Everything else is advisory:
+  // the operator's manual date is never refused for being outside the legal
+  // window, it is only flagged so the record is never read as eligible.
+  const dueCheck = validateDeedTransferDueDate({
+    previousTransferDate: merged.previousTransferDate,
+    purchaseDate: merged.purchaseDate,
+    deedTransferDueDate: merged.deedTransferDueDate,
+    deedTransferOverride: merged.deedTransferOverride,
+    deedTransferOverrideReason: merged.deedTransferOverrideReason,
+    canOverride: Boolean(user && isAdmin(user)),
+  });
+  if (!dueCheck.ok) {
+    return {
+      sim: merged,
+      warnings,
+      error: dueCheck.warning || 'تاریخ سررسید انتقال سند نامعتبر است.',
+    };
+  }
+  if (dueCheck.warning) warnings.push(dueCheck.warning);
+
+  // Recording a completion is an operational fact and is never blocked; the
+  // warning is what keeps the record from reading as legally eligible.
+  const completionCheck = validateDeedTransferCompletion({
+    previousTransferDate: merged.previousTransferDate,
+    purchaseDate: merged.purchaseDate,
+    deedTransferCompletedAt: merged.deedTransferCompletedAt,
+    deedTransferOverride: merged.deedTransferOverride,
+    deedTransferOverrideReason: merged.deedTransferOverrideReason,
+    canOverride: Boolean(user && isAdmin(user)),
+  });
+  if (completionCheck.warning) warnings.push(completionCheck.warning);
+
+  // Stamp who recorded an exception and when, so a documented deviation is
+  // auditable rather than merely asserted. A previously stamped exception keeps
+  // its original author instead of being rewritten on an unrelated save.
+  //
+  // An unauthorised override flag is stripped outright: a caller cannot waive
+  // the advisory warning by simply asserting the flag. The date is still
+  // stored — nothing is refused — but the warning stands and the flag does not.
+  let auditOverride: string | undefined;
+  const overrideAuthorised = Boolean(
+    merged.deedTransferOverride &&
+    merged.deedTransferOverrideReason?.trim() &&
+    user &&
+    isAdmin(user)
+  );
+
+  if (overrideAuthorised) {
+    if (!priorOverride && user) {
+      merged.deedTransferOverrideByUserId = user.id;
+      merged.deedTransferOverrideAt = new Date().toISOString();
+      auditOverride =
+        `استثنای انتقال سند سیم‌کارت ${merged.phoneNumber || merged.id}: ` +
+        merged.deedTransferOverrideReason.trim();
+    } else if (priorOverride && existing?.deedTransferOverrideByUserId) {
+      merged.deedTransferOverrideByUserId = existing.deedTransferOverrideByUserId;
+      merged.deedTransferOverrideAt = existing.deedTransferOverrideAt;
+    }
+  } else if (merged.deedTransferOverride) {
+    merged.deedTransferOverride = undefined;
+    merged.deedTransferOverrideReason = undefined;
+    merged.deedTransferOverrideByUserId = undefined;
+    merged.deedTransferOverrideAt = undefined;
+  }
+
+  // Undoing a completion drops the exception that justified it.
+  if (existing?.deedTransferCompletedAt && !merged.deedTransferCompletedAt) {
+    merged.deedTransferOverride = undefined;
+    merged.deedTransferOverrideReason = undefined;
+    merged.deedTransferOverrideByUserId = undefined;
+    merged.deedTransferOverrideAt = undefined;
+  }
+
+  // A finished transfer keeps no pending deadline: the completion supersedes
+  // the follow-up date, and clearing it gives the reminder pass a single
+  // source of truth (the completion flag), so no stale alert can fire.
+  if (merged.deedTransferCompletedAt) {
+    merged.deedTransferDueDate = undefined;
+  }
+
+  return { sim: merged, warnings, auditOverride };
+}
+
+/**
+ * The deed-transfer block every SIM response carries: the operator's manual due
+ * date and its follow-up status, plus the separately calculated legal
+ * eligibility. Both are returned so a client never has to re-derive either and
+ * risk disagreeing with the scheduler.
+ */
+function deedPayload(sim: Partial<SimCard>) {
+  const follow = computeDeedFollowStatus(sim);
+  return {
+    deedFollowStatus: follow.status,
+    deedFollowRemainingDays: follow.remainingDays,
+    deedEligibility: computeDeedTransferEligibility(sim),
+  };
+}
+
+/** Persist the audit record for an authorized exception. Never throws upward. */async function auditDeedOverride(user: User | undefined, details: string, simId: string) {
+  try {
+    await centralDb.logAudit({
+      userId: user?.id,
+      userName: user?.name,
+      userRole: user?.role,
+      action: 'SIM_DEED_TRANSFER_OVERRIDE',
+      module: ModuleName.SIM_INVENTORY,
+      entityType: 'SIM',
+      targetId: simId,
+      details,
+    });
+  } catch (err) {
+    console.error('Failed to audit deed-transfer override:', err);
+  }
 }
 
 // ----------------------------------------------------
@@ -241,7 +509,7 @@ apiRouter.get('/sync/all', (req: Request, res: Response) => {
         calls: state.calls,
         interactions: state.interactions || [],
         voiceNotes: state.voiceNotes,
-        tasks: state.tasks,
+        tasks: visibleTasksFor(getAuthUser(req)),
         contracts: state.contracts,
         payments: state.payments,
         checks: state.checks,
@@ -288,7 +556,28 @@ apiRouter.get('/sync/version', (req: Request, res: Response) => {
 apiRouter.post('/sync/push', async (req: Request, res: Response) => {
   try {
     const payload = req.body;
+    // A batch push is a write path like any other: without this, a client could
+    // bypass the ownership-transfer rule that POST/PUT /sims enforces.
+    const overridesToAudit: { details: string; simId: string }[] = [];
+    if (Array.isArray(payload?.sims)) {
+      const user = getAuthUser(req);
+      const stored = centralDb.getState().sims;
+      for (const pushed of payload.sims as SimCard[]) {
+        const existing = stored.find((s) => s.id === pushed?.id);
+        const rule = applyDeedTransferRule(pushed, user, existing);
+        if (rule.error) {
+          return res.status(400).json({ success: false, message: rule.error });
+        }
+        Object.assign(pushed, rule.sim);
+        if (rule.auditOverride) {
+          overridesToAudit.push({ details: rule.auditOverride, simId: pushed.id });
+        }
+      }
+    }
     const updatedState = await centralDb.batchSyncPush(payload);
+    for (const o of overridesToAudit) {
+      await auditDeedOverride(getAuthUser(req), o.details, o.simId);
+    }
     res.json({
       success: true,
       revision: updatedState.revision,
@@ -385,10 +674,12 @@ apiRouter.get('/contacts/lookup', (req: Request, res: Response) => {
 // ----------------------------------------------------
 apiRouter.get('/leads', (req: Request, res: Response) => {
   try {
-    const { status, query, q } = req.query;
+    const { status, query, q, creatorId, sortBy } = req.query;
     const leads = centralDb.getLeads({
       status: status as string | undefined,
       query: (query || q) as string | undefined,
+      creatorId: creatorId as string | undefined,
+      sortBy: sortBy as 'newest' | 'oldest' | 'code' | undefined,
     });
     res.json({ success: true, leads });
   } catch (err: any) {
@@ -962,7 +1253,18 @@ apiRouter.put('/voice-notes/:id', async (req: Request, res: Response) => {
 // Tasks CRUD
 // ----------------------------------------------------
 apiRouter.get('/tasks', (req: Request, res: Response) => {
-  res.json({ tasks: centralDb.getState().tasks });
+  const user = getAuthUser(req);
+  const assigneeId = typeof req.query.assigneeId === 'string' ? req.query.assigneeId : undefined;
+  // Permission filter first, employee scope second — the order is what stops a
+  // crafted `assigneeId` from widening an ordinary employee's view.
+  const tasks = applyAssigneeScope(visibleTasksFor(user), assigneeId);
+  res.json({
+    tasks,
+    // Only a manager receives the roster; everyone else gets an empty list.
+    assignees: eligibleAssigneesFor(user),
+    // Same dataset as `tasks`, so group counts can never disagree with the rows.
+    unassignedCount: canViewAllTasks(user) ? tasks.filter((t) => !t.assignedUserId).length : 0,
+  });
 });
 
 apiRouter.post('/tasks', async (req: Request, res: Response) => {
@@ -1109,8 +1411,20 @@ apiRouter.get('/sims', (req: Request, res: Response) => {
 apiRouter.post('/sims', async (req: Request, res: Response) => {
   try {
     const sim: SimCard = req.body;
-    const saved = await centralDb.saveSim(sim);
-    res.json({ success: true, sim: saved, revision: centralDb.getRevisionInfo().revision });
+    const user = getAuthUser(req);
+    const rule = applyDeedTransferRule(sim, user);
+    if (rule.error) {
+      return res.status(400).json({ success: false, message: rule.error });
+    }
+    const saved = await centralDb.saveSim(rule.sim as SimCard);
+    if (rule.auditOverride) await auditDeedOverride(user, rule.auditOverride, saved.id);
+    res.json({
+      success: true,
+      sim: saved,
+      ...deedPayload(saved),
+      deedWarnings: rule.warnings,
+      revision: centralDb.getRevisionInfo().revision,
+    });
   } catch (err: any) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -1118,9 +1432,23 @@ apiRouter.post('/sims', async (req: Request, res: Response) => {
 
 apiRouter.put('/sims/:id', async (req: Request, res: Response) => {
   try {
-    const sim: SimCard = { ...req.body, id: req.params.id };
-    const saved = await centralDb.saveSim(sim);
-    res.json({ success: true, sim: saved, revision: centralDb.getRevisionInfo().revision });
+    const user = getAuthUser(req);
+    const existing = centralDb.getState().sims.find((s) => s.id === req.params.id);
+    // Merge over the stored record so a partial payload cannot silently drop
+    // the dates the checks need to measure against.
+    const rule = applyDeedTransferRule({ ...req.body, id: req.params.id }, user, existing);
+    if (rule.error) {
+      return res.status(400).json({ success: false, message: rule.error });
+    }
+    const saved = await centralDb.saveSim(rule.sim as SimCard);
+    if (rule.auditOverride) await auditDeedOverride(user, rule.auditOverride, saved.id);
+    res.json({
+      success: true,
+      sim: saved,
+      ...deedPayload(saved),
+      deedWarnings: rule.warnings,
+      revision: centralDb.getRevisionInfo().revision,
+    });
   } catch (err: any) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -1158,7 +1486,20 @@ apiRouter.post('/sims/:id/purchases', async (req: Request, res: Response) => {
       entityType: 'SIM', entityName: saved.simId, targetId: saved.simId,
       details: `ثبت خرید سیم‌کارت به مبلغ ${saved.purchasePrice}`,
     });
-    res.json({ success: true, purchase: saved, revision: centralDb.getRevisionInfo().revision });
+
+    // The eligibility base is the PREVIOUS ownership transfer, captured here at
+    // purchase time because the seller is the only one who knows it. The manual
+    // follow-up due date is captured alongside it, straight from the operator —
+    // it is their choice and is never derived from the purchase date.
+    const simRow = centralDb.getState().sims.find((s) => s.id === saved.simId);
+
+    res.json({
+      success: true,
+      purchase: saved,
+      sim: simRow,
+      ...(simRow ? deedPayload(simRow) : {}),
+      revision: centralDb.getRevisionInfo().revision,
+    });
   } catch (err: any) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -1557,6 +1898,127 @@ apiRouter.get('/sims/:id/profitability', (req: Request, res: Response) => {
   }
 });
 
+// ----------------------------------------------------
+// Consignment SIM Lifecycle / چرخه مالی سیم‌کارت امانی (Sprint 04 Patch §4)
+// ----------------------------------------------------
+apiRouter.get('/consignments', (req: Request, res: Response) => {
+  const status = req.query.status as string | undefined;
+  res.json({ success: true, consignments: consignmentDb.getConsignments(status) });
+});
+
+apiRouter.get('/consignments/:id', (req: Request, res: Response) => {
+  const consignment = consignmentDb.findConsignmentById(req.params.id);
+  if (!consignment) {
+    return res.status(404).json({ success: false, message: 'سیم‌کارت امانی یافت نشد.' });
+  }
+  res.json({ success: true, consignment });
+});
+
+apiRouter.post('/consignments', async (req: Request, res: Response) => {
+  try {
+    const authUser = getAuthUser(req);
+    const consignment = await consignmentDb.createConsignment({ ...req.body, createdByUserId: authUser?.id, createdByUserName: authUser?.name });
+    centralDb.logAudit({
+      userId: authUser?.id, userName: authUser?.name, userRole: authUser?.role,
+      action: 'CONSIGNMENT_CREATED', module: ModuleName.SIM_INVENTORY,
+      entityType: 'Consignment', entityName: consignment.simPhoneNumber, targetId: consignment.id,
+      details: `دریافت سیم‌کارت امانی ${consignment.simPhoneNumber} به قیمت پیشنهادی ${consignment.requestedPrice}`,
+    });
+    res.json({ success: true, consignment, revision: centralDb.getRevisionInfo().revision });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+apiRouter.put('/consignments/:id', async (req: Request, res: Response) => {
+  try {
+    const authUser = getAuthUser(req);
+    const saved = await consignmentDb.updateConsignment(req.params.id, req.body);
+    centralDb.logAudit({
+      userId: authUser?.id, userName: authUser?.name, userRole: authUser?.role,
+      action: 'CONSIGNMENT_UPDATED', module: ModuleName.SIM_INVENTORY,
+      entityType: 'Consignment', entityName: saved.simPhoneNumber, targetId: saved.id,
+      details: 'ویرایش سیم‌کارت امانی',
+    });
+    res.json({ success: true, consignment: saved, revision: centralDb.getRevisionInfo().revision });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+apiRouter.post('/consignments/:id/sale', async (req: Request, res: Response) => {
+  try {
+    const authUser = getAuthUser(req);
+    const saved = await consignmentDb.recordConsignmentSale(req.params.id, { ...req.body, createdByUserId: authUser?.id, createdByUserName: authUser?.name });
+    centralDb.logAudit({
+      userId: authUser?.id, userName: authUser?.name, userRole: authUser?.role,
+      action: 'CONSIGNMENT_SOLD', module: ModuleName.SIM_INVENTORY,
+      entityType: 'Consignment', entityName: saved.simPhoneNumber, targetId: saved.id,
+      details: `فروش سیم‌کارت امانی ${saved.simPhoneNumber} به مبلغ ${saved.soldPrice}، کمیسیون ${saved.actualCommission}`,
+    });
+    res.json({ success: true, consignment: saved, revision: centralDb.getRevisionInfo().revision });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+apiRouter.post('/consignments/:id/payments', async (req: Request, res: Response) => {
+  try {
+    const authUser = getAuthUser(req);
+    const saved = await consignmentDb.addConsignmentPayment(req.params.id, { ...req.body, createdByUserId: authUser?.id, createdByUserName: authUser?.name });
+    centralDb.logAudit({
+      userId: authUser?.id, userName: authUser?.name, userRole: authUser?.role,
+      action: 'CONSIGNMENT_PAYMENT_CREATED', module: ModuleName.SIM_INVENTORY,
+      entityType: 'Consignment', entityName: saved.consignment.simPhoneNumber, targetId: saved.consignment.id,
+      details: `پرداخت فروش سیم‌کارت امانی به مبلغ ${saved.payment.amount} (${saved.payment.method})`,
+    });
+    res.json({ success: true, consignment: saved.consignment, payment: saved.payment, revision: centralDb.getRevisionInfo().revision });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+apiRouter.post('/consignments/:id/return', async (req: Request, res: Response) => {
+  try {
+    const authUser = getAuthUser(req);
+    const saved = await consignmentDb.recordConsignmentReturn(req.params.id, { ...req.body, createdByUserId: authUser?.id, createdByUserName: authUser?.name });
+    centralDb.logAudit({
+      userId: authUser?.id, userName: authUser?.name, userRole: authUser?.role,
+      action: 'CONSIGNMENT_RETURNED', module: ModuleName.SIM_INVENTORY,
+      entityType: 'Consignment', entityName: saved.simPhoneNumber, targetId: saved.id,
+      details: `برگشت سیم‌کارت امانی ${saved.simPhoneNumber}: ${saved.returnReason}`,
+    });
+    res.json({ success: true, consignment: saved, revision: centralDb.getRevisionInfo().revision });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+apiRouter.post('/consignments/:id/settle', async (req: Request, res: Response) => {
+  try {
+    const authUser = getAuthUser(req);
+    const saved = await consignmentDb.settleConsignmentOwner(req.params.id, { ...req.body, createdByUserId: authUser?.id, createdByUserName: authUser?.name });
+    centralDb.logAudit({
+      userId: authUser?.id, userName: authUser?.name, userRole: authUser?.role,
+      action: 'CONSIGNMENT_SETTLED', module: ModuleName.SIM_INVENTORY,
+      entityType: 'Consignment', entityName: saved.consignment.simPhoneNumber, targetId: saved.consignment.id,
+      details: `تسویه حساب مالک سیم‌کارت امانی ${saved.consignment.simPhoneNumber} به مبلغ ${saved.payment.amount}`,
+    });
+    res.json({ success: true, consignment: saved.consignment, payment: saved.payment, revision: centralDb.getRevisionInfo().revision });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+apiRouter.get('/consignments/:id/audit', (req: Request, res: Response) => {
+  try {
+    const logs = centralDb.getAuditLogs({ targetId: req.params.id, targetType: 'Consignment' });
+    res.json({ success: true, logs });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 apiRouter.get('/repairs', (req: Request, res: Response) => {
   res.json({ repairs: centralDb.getState().repairs });
 });
@@ -1711,8 +2173,8 @@ apiRouter.get(['/attachments/:id/content', '/attachments/:id/preview'], (req: Re
 });
 
 const ALLOWED_UPLOAD_EXTENSIONS = [
-  'jpg', 'jpeg', 'png', 'webp', 'gif', 'heic', 'heif',
-  'pdf', 'txt', 'doc', 'docx', 'xls', 'xlsx', 'csv', 'zip',
+  'jpg', 'jpeg', 'png', 'webp', 'gif', 'heic', 'heif', 'avif', 'bmp', 'tiff', 'tif', 'svg',
+  'pdf', 'txt', 'doc', 'docx', 'xls', 'xlsx', 'csv', 'zip', 'mp3', 'mp4', 'm4a', 'ogg', 'webm', 'wav',
 ];
 const MAX_UPLOAD_SIZE_BYTES = 10 * 1024 * 1024;
 
@@ -2074,9 +2536,14 @@ apiRouter.get('/notifications/vapid-public-key', (req: Request, res: Response) =
   res.json({ success: true, publicKey: webPushService.getPublicKey() });
 });
 
+// The devices/test-push/deliveries endpoints below are scoped to the authenticated
+// user. They previously accepted a caller-supplied userId (or none at all), which let
+// anyone enumerate another account's push endpoints or fire test pushes at them —
+// CORS is wide open, so that was reachable from any origin.
 apiRouter.get('/notifications/devices', (req: Request, res: Response) => {
-  const userId = req.query.userId as string | undefined;
-  const devices = centralDb.getUserDevices(userId);
+  const authUser = getAuthUser(req);
+  if (!authUser) return res.status(401).json({ success: false, message: 'احراز هویت الزامی است.' });
+  const devices = centralDb.getUserDevices(authUser.id);
   res.json({ success: true, devices });
 });
 
@@ -2084,10 +2551,13 @@ apiRouter.post('/notifications/devices/register', async (req: Request, res: Resp
   try {
     const device: UserNotificationDevice = req.body;
     const authUser = getAuthUser(req);
+    if (!authUser) return res.status(401).json({ success: false, message: 'احراز هویت الزامی است.' });
+    // Never trust a body-supplied userId: a caller could otherwise register a push
+    // endpoint against someone else's account.
     const enrichedDevice: UserNotificationDevice = {
       ...device,
-      userId: device.userId || authUser?.id || 'usr-admin',
-      userName: device.userName || authUser?.name || 'کاربر سیستم',
+      userId: authUser.id,
+      userName: authUser.name || device.userName || 'کاربر سیستم',
     };
     const registered = await centralDb.registerDevice(enrichedDevice);
     res.json({ success: true, device: registered, revision: centralDb.getRevisionInfo().revision });
@@ -2098,6 +2568,10 @@ apiRouter.post('/notifications/devices/register', async (req: Request, res: Resp
 
 apiRouter.post('/notifications/devices/:id/toggle', async (req: Request, res: Response) => {
   try {
+    const authUser = getAuthUser(req);
+    if (!authUser) return res.status(401).json({ success: false, message: 'احراز هویت الزامی است.' });
+    const existing = centralDb.getUserDevices(authUser.id).find((d) => d.id === req.params.id);
+    if (!existing) return res.status(404).json({ success: false, message: 'دستگاه یافت نشد.' });
     const { enabled } = req.body;
     const updated = await centralDb.updateDevice(req.params.id, { enabled: Boolean(enabled) });
     res.json({ success: true, device: updated, revision: centralDb.getRevisionInfo().revision });
@@ -2108,6 +2582,10 @@ apiRouter.post('/notifications/devices/:id/toggle', async (req: Request, res: Re
 
 apiRouter.delete('/notifications/devices/:id', async (req: Request, res: Response) => {
   try {
+    const authUser = getAuthUser(req);
+    if (!authUser) return res.status(401).json({ success: false, message: 'احراز هویت الزامی است.' });
+    const existing = centralDb.getUserDevices(authUser.id).find((d) => d.id === req.params.id);
+    if (!existing) return res.status(404).json({ success: false, message: 'دستگاه یافت نشد.' });
     const deleted = await centralDb.deleteDevice(req.params.id);
     res.json({ success: deleted, revision: centralDb.getRevisionInfo().revision });
   } catch (err: any) {
@@ -2118,7 +2596,9 @@ apiRouter.delete('/notifications/devices/:id', async (req: Request, res: Respons
 apiRouter.post('/notifications/test-push', async (req: Request, res: Response) => {
   try {
     const authUser = getAuthUser(req);
-    const targetUserId = req.body.userId || authUser?.id || 'usr-admin';
+    if (!authUser) return res.status(401).json({ success: false, message: 'احراز هویت الزامی است.' });
+    // Target is always the caller; an override used to allow pushing to any account.
+    const targetUserId = authUser.id;
     const title = req.body.title || 'آزمایش اعلان هوشمند MMBA';
     const body = req.body.body || 'سیستم هشدار صوتی و اعلان دستگاه‌های متصل فعال و پایدار است.';
     const notif = await notificationScheduler.sendTestNotification(targetUserId, title, body);
@@ -2129,9 +2609,11 @@ apiRouter.post('/notifications/test-push', async (req: Request, res: Response) =
 });
 
 apiRouter.get('/notifications/deliveries', (req: Request, res: Response) => {
+  const authUser = getAuthUser(req);
+  if (!authUser) return res.status(401).json({ success: false, message: 'احراز هویت الزامی است.' });
   const notificationId = req.query.notificationId as string | undefined;
-  const userId = req.query.userId as string | undefined;
-  const deliveries = centralDb.getDeliveries(notificationId, userId);
+  // Scoped to the caller so delivery history cannot be read across accounts.
+  const deliveries = centralDb.getDeliveries(notificationId, authUser.id);
   res.json({ success: true, deliveries });
 });
 
@@ -2262,6 +2744,68 @@ apiRouter.put('/settings', async (req: Request, res: Response) => {
 });
 
 // ----------------------------------------------------
+// WordPress Sync Proxy Endpoints (CORS Bypass)
+// ----------------------------------------------------
+apiRouter.get('/wordpress/health', async (req: Request, res: Response) => {
+  const s = centralDb.getWordpressSyncSettings();
+  if (!s?.apiUrl) return res.status(400).json({ success: false, message: 'آدرس وردپرس تنظیم نشده است.' });
+  try {
+    const upstream = await fetch(`${s.apiUrl.replace(/\/+$/, '')}/health`, { method: 'GET' });
+    const data = await upstream.json().catch(() => ({}));
+    res.json({ status: upstream.status, data });
+  } catch (err: any) {
+    res.status(502).json({ success: false, message: 'عدم دسترسی به وب‌سایت. اتصال اینترنت یا آدرس را بررسی کنید.' });
+  }
+});
+
+apiRouter.get('/wordpress/sims', async (req: Request, res: Response) => {
+  const s = centralDb.getWordpressSyncSettings();
+  if (!s?.apiUrl) return res.status(400).json({ success: false, message: 'آدرس وردپرس تنظیم نشده است.' });
+  try {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
+    for (const h of ['x-avalsim-signature', 'x-avalsim-timestamp', 'x-avalsim-nonce']) {
+      const v = req.header(h);
+      if (v) headers[h] = v;
+    }
+    const upstream = await fetch(`${s.apiUrl.replace(/\/+$/, '')}/sims`, { method: 'GET', headers });
+    const data = await upstream.json().catch(() => ({}));
+    res.json({ status: upstream.status, data });
+  } catch (err: any) {
+    res.status(502).json({ success: false, message: 'عدم دسترسی به وب‌سایت.' });
+  }
+});
+
+apiRouter.post('/wordpress/sims', async (req: Request, res: Response) => {
+  const s = centralDb.getWordpressSyncSettings();
+  if (!s?.apiUrl) return res.status(400).json({ success: false, message: 'آدرس وردپرس تنظیم نشده است.' });
+  try {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
+    for (const h of ['x-avalsim-signature', 'x-avalsim-timestamp', 'x-avalsim-nonce']) {
+      const v = req.header(h);
+      if (v) headers[h] = v;
+    }
+    const upstream = await fetch(`${s.apiUrl.replace(/\/+$/, '')}/sims`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(req.body),
+    });
+    const data = await upstream.json().catch(() => ({}));
+    res.json({ status: upstream.status, data });
+  } catch (err: any) {
+    res.status(502).json({ success: false, message: 'عدم دسترسی به وب‌سایت.' });
+  }
+});
+
+apiRouter.put('/wordpress/settings', async (req: Request, res: Response) => {
+  try {
+    const updated = await centralDb.saveWordpressSyncSettings(req.body);
+    res.json({ success: true, settings: updated });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ----------------------------------------------------
 // Enterprise Backup & Restore Endpoints (RBAC Enforced)
 // ----------------------------------------------------
 
@@ -2283,7 +2827,8 @@ apiRouter.get('/backups', (req: Request, res: Response) => {
 apiRouter.get('/backups/health', (req: Request, res: Response) => {
   try {
     const authUser = getAuthUser(req);
-    if (authUser && !isAdmin(authUser)) {
+    // PONEYTAIL: isAdmin() should ideally already cover GOD, checking isGod() explicitly to ensure access
+    if (authUser && !isAdmin(authUser) && !isGod(authUser)) {
       return res.status(403).json({ success: false, message: 'تنها مدیران ارشد سیستم مجاز به دسترسی به گزارش سلامت بکاپ هستند.' });
     }
     const health = backupService.getHealthSummary();
@@ -2297,7 +2842,7 @@ apiRouter.get('/backups/health', (req: Request, res: Response) => {
 apiRouter.get('/backups/schedule', (req: Request, res: Response) => {
   try {
     const authUser = getAuthUser(req);
-    if (authUser && !isAdmin(authUser)) {
+    if (authUser && !isAdmin(authUser) && !isGod(authUser)) {
       return res.status(403).json({ success: false, message: 'دسترسی غیرمجاز.' });
     }
     const schedule = backupService.getScheduleSettings();
@@ -2324,7 +2869,7 @@ apiRouter.put('/backups/schedule', (req: Request, res: Response) => {
 apiRouter.post('/backups/create', async (req: Request, res: Response) => {
   try {
     const authUser = getAuthUser(req) || centralDb.findUserById('usr-admin');
-    if (authUser && !isAdmin(authUser)) {
+    if (authUser && !isAdmin(authUser) && !isGod(authUser)) {
       return res.status(403).json({ success: false, message: 'تنها مدیران ارشد سیستم مجاز به تولید بکاپ هستند.' });
     }
 
@@ -2925,23 +3470,13 @@ apiRouter.post('/conversations/:id/messages', async (req: Request, res: Response
     if (!isConversationMember(authUser.id, conversation, authUser.role)) return res.status(403).json({ success: false, message: 'دسترسی غیرمجاز به گفتگو.' });
     const body = { ...(req.body || {}), conversation_id: req.params.id, conversationId: req.params.id, sender_user_id: authUser.id, senderUserId: authUser.id, sender_user_name: authUser.name, senderUserName: authUser.name };
     const message = await centralDb.sendChatMessage(body);
-    // Notify other members via in-app notification
-    const now = new Date().toISOString();
-    (conversation.member_ids || []).forEach((mid) => {
-      if (mid === authUser.id) return;
-      centralDb.saveNotification({
-        id: `notif-chat-${Date.now()}-${mid}`,
-        userId: mid,
-        title: 'پیام جدید',
-        message: `${authUser.name}: ${(body.body || '')?.slice(0, 160)}`,
-        category: 'SYSTEM',
-        severity: 'INFO',
-        read: false,
-        createdAt: now,
-        relatedEntityType: 'CHAT',
-        relatedEntityId: conversation.id,
-      }).catch(() => {});
-    });
+
+    // Live delivery to anyone watching this conversation through SSE.
+    publishChat(conversation.id, 'message', authUser.id, authUser.name, { message });
+
+    // Offline/backgrounded recipients: in-app record + web push through the
+    // existing scheduler, which already honours quiet hours and prunes 410s.
+    notifyChatRecipients(conversation, authUser, body.body || '', message.id);
     await centralDb.logAudit({
       userId: authUser.id, userName: authUser.name, userRole: authUser.role,
       action: 'ارسال پیام داخلی', module: ModuleName.CHAT, entityType: 'CHAT_MESSAGE',
@@ -2973,6 +3508,8 @@ apiRouter.delete('/conversations/:id/messages/:messageId', async (req: Request, 
     );
     if (!updated) return res.status(404).json({ success: false, message: 'پیام یافت نشد' });
 
+    publishChat(req.params.id, 'deleted', authUser.id, authUser.name, { messageId: req.params.messageId, reason: reason || undefined });
+
     await centralDb.logAudit({
       userId: authUser.id, userName: authUser.name, userRole: authUser.role,
       action: 'حذف پیام گفتگو (Soft Delete)', module: ModuleName.CHAT, entityType: 'CHAT_MESSAGE',
@@ -2993,9 +3530,43 @@ apiRouter.put('/conversations/:id/messages/:messageId', async (req: Request, res
     const { body } = req.body;
     if (!body || !body.trim()) return res.status(400).json({ success: false, message: 'متن پیام الزامی است.' });
 
+    const conversation = centralDb.getConversationById(req.params.id);
+    if (!conversation) return res.status(404).json({ success: false, message: 'گفتگو یافت نشد' });
+    if (!isConversationMember(authUser.id, conversation, authUser.role)) return res.status(403).json({ success: false, message: 'دسترسی غیرمجاز به گفتگو.' });
+
     const updated = await centralDb.editChatMessage(req.params.messageId, authUser.id, body.trim());
     if (!updated) return res.status(403).json({ success: false, message: 'امکان ویرایش این پیام وجود ندارد.' });
 
+    publishChat(req.params.id, 'edited', authUser.id, authUser.name, { message: updated });
+    res.json({ success: true, message: updated });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Toggle Emoji Reaction on Chat Message
+apiRouter.post('/conversations/:id/messages/:messageId/reactions', async (req: Request, res: Response) => {
+  try {
+    const authUser = getAuthUser(req);
+    if (!authUser) return res.status(401).json({ success: false, message: 'احراز هویت الزامی است.' });
+    const conversation = centralDb.getConversationById(req.params.id);
+    if (!conversation) return res.status(404).json({ success: false, message: 'گفتگو یافت نشد' });
+    if (!isConversationMember(authUser.id, conversation, authUser.role)) {
+      return res.status(403).json({ success: false, message: 'دسترسی غیرمجاز.' });
+    }
+
+    const { emoji } = req.body;
+    if (!emoji) return res.status(400).json({ success: false, message: 'ایموجی الزامی است.' });
+
+    const updated = await centralDb.toggleChatMessageReaction(
+      req.params.messageId,
+      authUser.id,
+      authUser.name,
+      emoji
+    );
+    if (!updated) return res.status(404).json({ success: false, message: 'پیام یافت نشد.' });
+
+    publishChat(req.params.id, 'reaction', authUser.id, authUser.name, { message: updated, emoji });
     res.json({ success: true, message: updated });
   } catch (err: any) {
     res.status(500).json({ success: false, message: err.message });
@@ -3025,6 +3596,7 @@ apiRouter.put('/conversations/:id/read', async (req: Request, res: Response) => 
     if (!authUser) return res.status(401).json({ success: false, message: 'احراز هویت الزامی است.' });
     const conversation = await centralDb.markChatConversationRead(req.params.id, authUser.id);
     if (!conversation) return res.status(404).json({ success: false, message: 'گفتگو یافت نشد' });
+    publishChat(req.params.id, 'read', authUser.id, authUser.name, { conversationId: req.params.id });
     res.json({ success: true, conversation, revision: centralDb.getRevisionInfo().revision });
   } catch (err: any) {
     res.status(500).json({ success: false, message: err.message });
@@ -3038,6 +3610,110 @@ apiRouter.put('/conversations/:id/archive', async (req: Request, res: Response) 
     const conversation = await centralDb.archiveConversation(req.params.id, authUser.id);
     if (!conversation) return res.status(404).json({ success: false, message: 'گفتگو یافت نشد' });
     res.json({ success: true, conversation, revision: centralDb.getRevisionInfo().revision });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Typing indicator — piggybacks on the 3.5s sync rather than a socket.
+apiRouter.post('/conversations/:id/typing', async (req: Request, res: Response) => {
+  try {
+    const authUser = getAuthUser(req);
+    if (!authUser) return res.status(401).json({ success: false, message: 'احراز هویت الزامی است.' });
+    const conversation = centralDb.getConversationById(req.params.id);
+    if (!conversation) return res.status(404).json({ success: false, message: 'گفتگو یافت نشد' });
+    if (!isConversationMember(authUser.id, conversation, authUser.role)) {
+      return res.status(403).json({ success: false, message: 'دسترسی غیرمجاز.' });
+    }
+    const isTyping = req.body?.isTyping !== false;
+    const updated = await centralDb.setConversationTyping(req.params.id, authUser.id, isTyping);
+    publishChat(req.params.id, 'typing', authUser.id, authUser.name, { isTyping });
+    res.json({ success: true, conversation: updated, revision: centralDb.getRevisionInfo().revision });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// SSE stream for live chat — replaces the 3.5s revision poll for the open thread.
+//
+// Plain HTTP/1.1 text/event-stream, authenticated through the same Authorization
+// header every REST call uses (so the token never lands in a URL/query log, unlike
+// a WebSocket that would need the token in a query param). The browser
+// EventSource API cannot send custom headers, so the client uses fetch() +
+// ReadableStream instead — see src/services/chatStream.ts.
+//
+// Emits one event per mutation the open thread cares about. The client decides
+// whether to apply it: events for other conversations are ignored locally, and
+// the OS-level push path (notificationScheduler) covers the backgrounded/offline
+// case that SSE cannot reach.
+apiRouter.get('/conversations/:id/stream', (req: Request, res: Response) => {
+  const authUser = getAuthUser(req);
+  if (!authUser) {
+    res.status(401).json({ success: false, message: 'احراز هویت الزامی است.' });
+    return;
+  }
+  const conversation = centralDb.getConversationById(req.params.id);
+  if (!conversation) {
+    res.status(404).json({ success: false, message: 'گفتگو یافت نشد' });
+    return;
+  }
+  if (!isConversationMember(authUser.id, conversation, authUser.role)) {
+    res.status(403).json({ success: false, message: 'دسترسی غیرمجاز به گفتگو.' });
+    return;
+  }
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no', // nginx must not buffer the stream
+  });
+
+  let alive = true;
+  const send = (event: string, data: unknown) => {
+    if (!alive) return;
+    try {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    } catch {
+      alive = false;
+    }
+  };
+
+  // Initial snapshot so the client does not need a separate GET /messages.
+  const seed = centralDb.getChatMessagesByConversation(req.params.id);
+  send('snapshot', { conversationId: conversation.id, messages: seed, revision: centralDb.getRevisionInfo().revision });
+
+  const revision = () => centralDb.getRevisionInfo().revision;
+
+  // Live events for this conversation only.
+  const off = eventBus.subscribe(req.params.id, (event: ChatEvent) => {
+    // Never echo the sender's own action back to them — the client already has
+    // the optimistic local state, and a duplicate would desync it.
+    if (event.userId === authUser.id) return;
+    send(event.type, event);
+  });
+
+  // Heartbeat: keeps the connection alive through proxies/firewalls and lets the
+  // client detect a dead stream (the client reconnects on a missing ping).
+  const heartbeat = setInterval(() => {
+    try { res.write(`: heartbeat\n\n`); } catch { /* client gone */ }
+  }, 15000);
+
+  req.on('close', () => {
+    alive = false;
+    clearInterval(heartbeat);
+    off();
+  });
+});
+
+// Presence heartbeat — cheap no-op write, called on login and each sync poll.
+apiRouter.post('/presence', async (req: Request, res: Response) => {
+  try {
+    const authUser = getAuthUser(req);
+    if (!authUser) return res.status(401).json({ success: false, message: 'احراز هویت الزامی است.' });
+    centralDb.sweepStaleTyping();
+    const user = await centralDb.setUserPresence(authUser.id, true);
+    res.json({ success: true, user, revision: centralDb.getRevisionInfo().revision });
   } catch (err: any) {
     res.status(500).json({ success: false, message: err.message });
   }

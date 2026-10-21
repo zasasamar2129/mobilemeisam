@@ -14,6 +14,11 @@ import { storage } from '../../services/storage';
 import { useToast } from '../ui/Toast';
 import { useTranslation } from '../../lib/i18n';
 import {
+  useCustomerCreationHandoff,
+  customerCreateOption,
+  CUSTOMER_CREATE_VALUE,
+} from '../customers/useCustomerCreationHandoff';
+import {
   Mic, Square, Pause, Play, RotateCcw, Sparkles, Check,
   Volume2, Tag, CheckSquare, AlertCircle, AlertTriangle, RefreshCw,
   FileAudio, Upload, Music, Settings, HelpCircle, ShieldAlert
@@ -39,6 +44,7 @@ export const VoiceNoteRecorderModal: React.FC<VoiceNoteRecorderModalProps> = ({
 }) => {
   const { language, isRtl } = useTranslation();
   const { success, error: toastError } = useToast();
+  const customerHandoff = useCustomerCreationHandoff();
 
   const [mode, setMode] = useState<'RECORD' | 'UPLOAD'>(initialMode);
   const [title, setTitle] = useState('');
@@ -122,7 +128,11 @@ export const VoiceNoteRecorderModal: React.FC<VoiceNoteRecorderModalProps> = ({
       cancelRecording();
       stopListening();
     }
-  }, [isOpen, initialCustomer, allCustomers, initialMode, cancelRecording, resetAudio, stopListening]);
+    // `allCustomers` is read for its first-id default but deliberately kept out of
+    // the deps: any customer-list refresh hands us a new array identity and would
+    // otherwise re-run this reset, wiping an in-progress note draft.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, initialCustomer, initialMode, cancelRecording, resetAudio, stopListening]);
 
   // Handle start recording triggered directly on user click
   const handleStartRecording = async () => {
@@ -370,6 +380,7 @@ export const VoiceNoteRecorderModal: React.FC<VoiceNoteRecorderModalProps> = ({
   };
 
   return (
+    <>
     <Modal
       isOpen={isOpen}
       onClose={onClose}
@@ -647,13 +658,21 @@ export const VoiceNoteRecorderModal: React.FC<VoiceNoteRecorderModalProps> = ({
               </label>
               <Select
                 value={customerId}
-                onChange={(e) => setCustomerId(e.target.value)}
+                onChange={(e) => {
+                  if (e.target.value === CUSTOMER_CREATE_VALUE) {
+                    // Recording stays intact underneath; select the new customer on save.
+                    customerHandoff.open((c) => setCustomerId(c.id));
+                    return;
+                  }
+                  setCustomerId(e.target.value);
+                }}
                 options={[
                   { value: '', label: 'بدون ارتباط به مشتری خاص (یادداشت عمومی)' },
                   ...(allCustomers || []).map((c) => ({
                     value: c.id,
                     label: `${c.name} ${c.companyName ? `(${c.companyName})` : ''}`,
                   })),
+                  customerCreateOption(),
                 ]}
               />
             </div>
@@ -780,5 +799,7 @@ export const VoiceNoteRecorderModal: React.FC<VoiceNoteRecorderModalProps> = ({
         </div>
       </form>
     </Modal>
+    {customerHandoff.modal}
+    </>
   );
 };

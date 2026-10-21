@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { CheckItem, CheckType, CheckStatus, Customer } from '../../types';
+import { CheckItem, CheckType, CheckStatus, Customer, User } from '../../types';
 import {
   CreditCard, Search, Plus, Calendar, AlertTriangle,
   CheckCircle2, Edit3, Trash2, ArrowUpRight, ArrowDownLeft
@@ -19,10 +19,11 @@ import { useTranslation } from '../../lib/i18n';
 export interface CheckListProps {
   checks: CheckItem[];
   customers: Customer[];
+  currentUser?: User;
   onAddNewCheck: () => void;
   onEditCheck: (check: CheckItem) => void;
   onRefreshChecks: () => void;
-  onSelectCustomer: (customerId: string) => void;
+  onSelectCustomer?: (customerId: string) => void;
 }
 
 export const CheckList: React.FC<CheckListProps> = ({
@@ -70,7 +71,7 @@ export const CheckList: React.FC<CheckListProps> = ({
     }
   };
 
-  const getStatusBadge = (status: CheckStatus) => {
+  const getStatusBadge = (status: CheckStatus | string) => {
     switch (status) {
       case CheckStatus.CLEARED:
         return <Badge variant="emerald" size="sm">{t('checks.statusCleared')}</Badge>;

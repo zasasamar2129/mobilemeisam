@@ -12,7 +12,7 @@ import {
   User, Phone, Building2, MapPin, Tag, Check, Hash, RotateCcw,
   AlertTriangle, ExternalLink, Edit3, UserCheck, ShieldAlert
 } from 'lucide-react';
-import { normalizePhoneNumber } from '../../lib/numberUtils';
+import { normalizePhoneNumber, cleanDigits } from '../../lib/numberUtils';
 
 export interface CustomerFormModalProps {
   isOpen: boolean;
@@ -427,7 +427,7 @@ export const CustomerFormModal: React.FC<CustomerFormModalProps> = ({
             <Input
               label="شماره موبایل (یکتا)"
               value={mobile}
-              onChange={(e) => setMobile(e.target.value)}
+              onChange={(e) => setMobile(cleanDigits(e.target.value))}
               isRequired
               placeholder="0912..."
               rightIcon={<Phone className="w-4 h-4" />}
@@ -446,7 +446,7 @@ export const CustomerFormModal: React.FC<CustomerFormModalProps> = ({
             <Input
               label="تلفن ثابت / دفتر"
               value={phone}
-              onChange={(e) => setPhone(e.target.value)}
+              onChange={(e) => setPhone(cleanDigits(e.target.value))}
               placeholder="021..."
               className={duplicateConflict && duplicateConflict.type === 'phone' ? 'border-rose-500 focus:border-rose-500 focus:ring-rose-500/30' : ''}
             />

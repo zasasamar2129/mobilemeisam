@@ -42,6 +42,7 @@ export const AccountingDashboard: React.FC<AccountingDashboardProps> = ({ curren
     title: string;
     subtitle?: string;
     documentNumber?: string;
+    documentDate?: string;
     content: React.ReactNode;
   }>({
     isOpen: false,

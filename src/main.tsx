@@ -21,6 +21,9 @@ if ('serviceWorker' in navigator && process.env.NODE_ENV !== 'test') {
   });
 }
 
+// Enable proxy for WordPress sync
+(window as any).__MMBA_PROXY__ = true;
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ErrorBoundary>

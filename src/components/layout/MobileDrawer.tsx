@@ -117,7 +117,7 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({
             animate={{ x: 0 }}
             exit={{ x: isRtl ? '100%' : '-100%' }}
             transition={{ type: 'spring', damping: 28, stiffness: 280 }}
-            className={`relative w-[300px] max-w-[85vw] h-full bg-surface ${
+            className={`mobile-drawer relative w-[300px] max-w-[85vw] h-full bg-surface ${
               isRtl ? 'border-l' : 'border-r'
             } border-primary shadow-2xl flex flex-col z-10 select-none overflow-hidden`}
             aria-label="Mobile Navigation"

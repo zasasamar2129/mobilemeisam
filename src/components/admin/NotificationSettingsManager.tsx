@@ -11,6 +11,19 @@ import { storage } from '../../services/storage';
 import { formatPersianDate } from '../../lib/dateUtils';
 import { useTranslation } from '../../lib/i18n';
 
+// The notification endpoints require the session token. This mirrors the same
+// localStorage key that api.ts reads, so login/logout stay in step.
+function authHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  try {
+    const token = localStorage.getItem('mmba_auth_token');
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+  } catch {
+    /* private mode */
+  }
+  return headers;
+}
+
 interface UserDevice {
   id: string;
   userId: string;
@@ -74,7 +87,7 @@ export const NotificationSettingsManager: React.FC = () => {
     setLoading(true);
     try {
       // Load settings
-      const settingsRes = await fetch(`/api/v1/notifications/settings?userId=${currentUser.id}`);
+      const settingsRes = await fetch('/api/v1/notifications/settings', { headers: authHeaders() });
       if (settingsRes.ok) {
         const data = await settingsRes.json();
         if (data?.settings) {
@@ -86,14 +99,14 @@ export const NotificationSettingsManager: React.FC = () => {
       }
 
       // Load devices
-      const devicesRes = await fetch(`/api/v1/notifications/devices?userId=${currentUser.id}`);
+      const devicesRes = await fetch('/api/v1/notifications/devices', { headers: authHeaders() });
       if (devicesRes.ok) {
         const data = await devicesRes.json();
         setDevices(data.devices || []);
       }
 
       // Load deliveries
-      const deliveriesRes = await fetch(`/api/v1/notifications/deliveries?userId=${currentUser.id}`);
+      const deliveriesRes = await fetch('/api/v1/notifications/deliveries', { headers: authHeaders() });
       if (deliveriesRes.ok) {
         const data = await deliveriesRes.json();
         setDeliveries(data.deliveries || []);
@@ -116,8 +129,10 @@ export const NotificationSettingsManager: React.FC = () => {
   const handleSaveSettings = async () => {
     try {
       const res = await fetch('/api/v1/notifications/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(() => { try { const t = localStorage.getItem('mmba_auth_token'); return t ? { Authorization: 'Bearer ' + t } : {}; } catch { return {}; } })(),        },
         body: JSON.stringify({
           userId: currentUser.id,
           ...settings,
@@ -153,10 +168,10 @@ export const NotificationSettingsManager: React.FC = () => {
 
   const handleUnregisterDevice = async (deviceId: string) => {
     try {
-      const res = await fetch(`/api/v1/notifications/devices/${deviceId}`, {
-        method: 'DELETE',
-      });
-      if (res.ok) {
+      // Goes through pushService so the browser-side subscription is unsubscribed
+      // too — a raw fetch would leave a live endpoint that 410s on every send.
+      const ok = await pushService.deleteDevice(deviceId);
+      if (ok) {
         success(isRtl ? 'دستگاه با موفقیت حذف شد' : 'Device deleted');
         setDevices((prev) => prev.filter((d) => d.id !== deviceId));
       }
@@ -195,7 +210,7 @@ export const NotificationSettingsManager: React.FC = () => {
     <div className="space-y-6 text-right animate-blur-fade-up">
       {/* Top Banner / Device Status */}
       <div className="p-5 rounded-2xl liquid-glass-card border border-indigo-200 dark:border-indigo-800/50 flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div className="flex items-start gap-3">
+        <div className="flex items-start gap-3 min-w-0">
           <div className="p-3 rounded-xl bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20 shrink-0">
             <Bell className="w-6 h-6" />
           </div>
@@ -214,7 +229,7 @@ export const NotificationSettingsManager: React.FC = () => {
           </div>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
           <Button
             variant="outline"
             size="sm"
@@ -230,7 +245,7 @@ export const NotificationSettingsManager: React.FC = () => {
             onClick={handleRegisterCurrentDevice}
             leftIcon={<Smartphone className="w-4 h-4" />}
           >
-            {isRtl ? 'ثبت این مرورگر برای دریافت پوش' : 'Register Current Device'}
+            {isRtl ? 'ثبت دستگاه' : 'Register Device'}
           </Button>
         </div>
       </div>

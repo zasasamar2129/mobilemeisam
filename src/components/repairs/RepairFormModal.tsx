@@ -12,6 +12,7 @@ import { useToast } from '../ui/Toast';
 import { Wrench, Check, ShieldCheck, DollarSign } from 'lucide-react';
 import { formatToman } from '../../lib/currencyUtils';
 import { useTranslation } from '../../lib/i18n';
+import { useCustomerCreationHandoff, CUSTOMER_CREATE_VALUE, customerCreateOption } from '../customers/useCustomerCreationHandoff';
 
 export interface RepairFormModalProps {
   isOpen: boolean;
@@ -47,6 +48,9 @@ export const RepairFormModal: React.FC<RepairFormModalProps> = ({
   const [finalCost, setFinalCost] = useState('');
   const [assignedTechnicianId, setAssignedTechnicianId] = useState('');
   const [warrantyUntil, setWarrantyUntil] = useState('');
+  // "Create customer" handoff — the repair ticket draft survives the round-trip
+  // into the customer modal.
+  const customerHandoff = useCustomerCreationHandoff();
 
   useEffect(() => {
     if (ticketToEdit) {
@@ -57,7 +61,7 @@ export const RepairFormModal: React.FC<RepairFormModalProps> = ({
       setSerialNumber(ticketToEdit.serialNumber || '');
       setProblemDescription(ticketToEdit.problemDescription || '');
       setTechnicianNotes(ticketToEdit.technicianNotes || '');
-      setStatus(ticketToEdit.status || RepairStatus.RECEIVED);
+      setStatus((ticketToEdit.status || RepairStatus.RECEIVED) as RepairStatus);
       setEstimatedCost(String(ticketToEdit.estimatedCost || ''));
       setFinalCost(String(ticketToEdit.finalCost || ''));
       setAssignedTechnicianId(ticketToEdit.assignedTechnicianId || '');
@@ -78,7 +82,7 @@ export const RepairFormModal: React.FC<RepairFormModalProps> = ({
       setAssignedTechnicianId(currentUser.id);
       setWarrantyUntil('');
     }
-  }, [ticketToEdit, initialCustomer, allCustomers, isOpen]);
+  }, [ticketToEdit, initialCustomer, isOpen]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -132,6 +136,7 @@ export const RepairFormModal: React.FC<RepairFormModalProps> = ({
   const rawFin = Number(finalCost.replace(/,/g, '')) || 0;
 
   return (
+    <>
     <Modal
       isOpen={isOpen}
       onClose={onClose}
@@ -157,12 +162,21 @@ export const RepairFormModal: React.FC<RepairFormModalProps> = ({
           <Select
             label={t('repairs.customer')}
             value={customerId}
-            onChange={(e) => setCustomerId(e.target.value)}
+            onChange={(e) => {
+              if (e.target.value === CUSTOMER_CREATE_VALUE) {
+                customerHandoff.open((c) => setCustomerId(c.id));
+              } else {
+                setCustomerId(e.target.value);
+              }
+            }}
             isRequired
-            options={(allCustomers || []).map((c) => ({
-              value: c.id,
-              label: `${c.name} (${c.mobile})`,
-            }))}
+            options={[
+              customerCreateOption(),
+              ...(allCustomers || []).map((c) => ({
+                value: c.id,
+                label: `${c.name} (${c.mobile})`,
+              })),
+            ]}
           />
 
           <Select
@@ -296,5 +310,7 @@ export const RepairFormModal: React.FC<RepairFormModalProps> = ({
         </div>
       </form>
     </Modal>
+      {customerHandoff.modal}
+    </>
   );
 };

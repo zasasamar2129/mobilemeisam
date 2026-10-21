@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
 import { apiRouter } from './server/routes';
 import { notificationScheduler } from './server/notificationScheduler';
+import { wordpressProxy } from './server/wordpressProxy';
 
 dotenv.config();
 
@@ -12,8 +13,8 @@ async function startServer() {
   const PORT = Number(process.env.PORT) || 3000;
 
   // Body parsers with generous payload limits for receipts/attachments/voice
-  app.use(express.json({ limit: '50mb' }));
-  app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+  app.use(express.json({ limit: '100mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
   // Basic CORS & Security Headers
   app.use((req, res, next) => {
@@ -26,6 +27,10 @@ async function startServer() {
     next();
   });
 
+  // WordPress catalogue proxy — forwards signed requests server-side so the
+  // panel never makes a cross-origin fetch to the WordPress host.
+  app.use('/api/wordpress', wordpressProxy);
+
   // Mount Centralized MMBA API Router FIRST
   app.use('/api/v1', apiRouter);
   app.use('/api', apiRouter);
@@ -33,7 +38,16 @@ async function startServer() {
   // Vite middleware for development or Static files for production
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        watch: {
+          // The app persists every mutation to data/*.json (presence heartbeats,
+          // read receipts, chat). Without this Vite sees each write as a change
+          // and full-reloads the page every few seconds. Server-side files are
+          // picked up by tsx, so there is nothing to gain from watching them here.
+          ignored: ['**/data/**', '**/dist/**', '**/node_modules/**'],
+        },
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);

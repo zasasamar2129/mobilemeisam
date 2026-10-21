@@ -3,6 +3,7 @@ import {
   Lead, LeadActivity, LeadActivityType, LeadStatus, User, TaskPriority, ModuleName
 } from '../../types';
 import { storage } from '../../services/storage';
+import { HorizontalScrollContainer } from '../ui/HorizontalScrollContainer';
 import { Modal } from '../ui/Modal';
 import { Button } from '../ui/Button';
 import { Badge } from '../ui/Badge';
@@ -253,7 +254,7 @@ export const LeadTimelineActivityModal: React.FC<LeadTimelineActivityModalProps>
                 </Button>
               </div>
             ) : (
-              <div className="overflow-x-auto rounded-2xl border border-slate-200 dark:border-slate-800">
+              <HorizontalScrollContainer className="rounded-2xl border border-slate-200 dark:border-slate-800">
                 <table className="w-full text-right text-xs">
                   <thead className="bg-slate-100 dark:bg-slate-800/80 text-slate-700 dark:text-slate-300 font-bold border-b border-slate-200 dark:border-slate-700">
                     <tr>
@@ -310,7 +311,7 @@ export const LeadTimelineActivityModal: React.FC<LeadTimelineActivityModalProps>
                     })}
                   </tbody>
                 </table>
-              </div>
+              </HorizontalScrollContainer>
             )}
           </div>
         )}
@@ -468,7 +469,7 @@ export const LeadTimelineActivityModal: React.FC<LeadTimelineActivityModalProps>
                 هیچ رکورد حسابرسی برای این سرنخ ثبت نشده است.
               </div>
             ) : (
-              <div className="overflow-x-auto rounded-2xl border border-slate-200 dark:border-slate-800">
+              <HorizontalScrollContainer className="rounded-2xl border border-slate-200 dark:border-slate-800">
                 <table className="w-full text-right text-xs">
                   <thead className="bg-slate-100 dark:bg-slate-800/80 text-slate-700 dark:text-slate-300 font-bold border-b border-slate-200 dark:border-slate-700">
                     <tr>
@@ -518,7 +519,7 @@ export const LeadTimelineActivityModal: React.FC<LeadTimelineActivityModalProps>
                     ))}
                   </tbody>
                 </table>
-              </div>
+              </HorizontalScrollContainer>
             )}
           </div>
         )}

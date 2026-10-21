@@ -10,7 +10,11 @@ export interface BadgeProps extends React.HTMLAttributes<HTMLSpanElement> {
     | 'info'
     | 'purple'
     | 'amber'
-    | 'outline';
+    | 'outline'
+    | 'emerald'
+    | 'indigo'
+    | 'rose'
+    | 'primary';
   size?: 'sm' | 'md';
   dot?: boolean;
 }
@@ -29,9 +33,13 @@ export const Badge: React.FC<BadgeProps> = ({
     warning: 'bg-amber-50 dark:bg-amber-500/10 text-warning dark:text-amber-300 border-amber-200 dark:border-amber-500/25',
     danger: 'bg-rose-50 dark:bg-danger/10 text-danger dark:text-rose-400 border-rose-200 dark:border-rose-500/25',
     info: 'bg-sky-50 dark:bg-info/10 text-info dark:text-sky-400 border-sky-200 dark:border-sky-500/25',
-    purple: 'bg-primary-light dark:bg-primary/10 text-primary border-indigo-200 dark:border-indigo-500/25',
+    purple: 'bg-violet-50 dark:bg-violet-500/15 text-violet-700 dark:text-violet-300 border-violet-200 dark:border-violet-500/30 shadow-[0_0_10px_rgba(139,92,246,0.15)]',
     amber: 'bg-amber-50 dark:bg-amber-500/15 text-warning dark:text-amber-400 border-amber-200 dark:border-amber-400/30',
     outline: 'bg-transparent text-secondary border-slate-300 dark:border-slate-600',
+    emerald: 'bg-emerald-50 dark:bg-success/10 text-success dark:text-emerald-400 border-emerald-200 dark:border-emerald-500/25',
+    indigo: 'bg-indigo-50 dark:bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-500/30 shadow-[0_0_10px_rgba(99,102,241,0.15)]',
+    rose: 'bg-rose-50 dark:bg-danger/10 text-danger dark:text-rose-400 border-rose-200 dark:border-rose-500/25',
+    primary: 'bg-violet-50 dark:bg-violet-500/20 text-violet-700 dark:text-violet-300 border-violet-200 dark:border-violet-500/30 shadow-[0_0_10px_rgba(139,92,246,0.2)]',
   };
 
   const dotColors = {
@@ -43,6 +51,10 @@ export const Badge: React.FC<BadgeProps> = ({
     purple: 'bg-primary',
     amber: 'bg-amber-500',
     outline: 'bg-slate-400',
+    emerald: 'bg-emerald-500 animate-pulse',
+    indigo: 'bg-primary',
+    rose: 'bg-rose-500 animate-pulse',
+    primary: 'bg-primary',
   };
 
   const sizes = {

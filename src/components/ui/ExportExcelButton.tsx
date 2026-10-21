@@ -11,6 +11,7 @@ export interface ExportExcelButtonProps {
   variant?: ButtonProps['variant'];
   className?: string;
   itemCount?: number;
+  filename?: string;
 }
 
 export const ExportExcelButton: React.FC<ExportExcelButtonProps> = ({

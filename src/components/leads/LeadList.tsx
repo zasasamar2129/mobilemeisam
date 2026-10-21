@@ -7,6 +7,7 @@ import { Badge } from '../ui/Badge';
 import { Modal } from '../ui/Modal';
 import { LeadConvertModal } from './LeadConvertModal';
 import { LeadTimelineActivityModal } from './LeadTimelineActivityModal';
+import { HorizontalScrollContainer } from '../ui/HorizontalScrollContainer';
 import { ListViewControls, usePersistentViewMode } from '../ui/ListViewControls';
 import {
   UserPlus, Search, Phone, PhoneCall, Calendar, ArrowUpRight,
@@ -15,6 +16,7 @@ import {
 } from 'lucide-react';
 import { useToast } from '../ui/Toast';
 import { formatPersianDate } from '../../lib/dateUtils';
+import { useResizableColumns } from '../../lib/useResizableColumns';
 
 export interface LeadListProps {
   currentUser?: User;
@@ -37,6 +39,12 @@ export const LeadList: React.FC<LeadListProps> = ({
   const [viewMode, setViewMode] = usePersistentViewMode('leads', 'list');
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
+
+  // Drag-to-resize column widths — persisted per user, per table.
+  const columns = useResizableColumns({
+    tableId: 'leads.list',
+    userId: currentUser?.id || storage.getCurrentUser()?.id,
+  });
 
   // Modals State
   const [selectedLeadForConvert, setSelectedLeadForConvert] = useState<Lead | null>(null);
@@ -105,6 +113,8 @@ export const LeadList: React.FC<LeadListProps> = ({
         notes: quickNotes.trim() || undefined,
         source: quickSource.trim() || 'تماس ورودی',
         status: LeadStatus.NEW_LEAD,
+        createdById: currentUser?.id,
+        createdByUserName: currentUser?.name,
       });
       success(`سرنخ جدید با کد «${saved.leadCode}» ثبت شد.`);
       setIsQuickLeadModalOpen(false);
@@ -240,6 +250,19 @@ export const LeadList: React.FC<LeadListProps> = ({
         pageSizeOptions={[10, 25, 50, 100]}
       />
 
+      {columns.hasCustomWidths && (
+        <div className="flex justify-end">
+          <Button
+            variant="outline"
+            size="xs"
+            onClick={columns.resetWidths}
+            title="بازنشانی عرض ستون‌ها به حالت پیش‌فرض"
+          >
+            بازنشانی عرض ستون‌ها
+          </Button>
+        </div>
+      )}
+
       {/* Main Content: Empty State or Paginated Items */}
       {filteredLeads.length === 0 ? (
         <div className="p-8 text-center bg-slate-50 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-800 rounded-2xl">
@@ -251,17 +274,44 @@ export const LeadList: React.FC<LeadListProps> = ({
         </div>
       ) : viewMode === 'list' ? (
         /* ROW / LIST VIEW (TABLE) */
-        <div className="overflow-x-auto rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xs">
-          <table className="w-full text-right text-xs">
+        <HorizontalScrollContainer className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xs">
+          <table className="w-full text-right text-xs" style={columns.tableStyle}>
             <thead className="bg-slate-100 dark:bg-slate-800/80 text-slate-700 dark:text-slate-300 font-bold border-b border-slate-200 dark:border-slate-700">
               <tr>
-                <th className="p-3 w-28">کد سرنخ</th>
-                <th className="p-3">نام و مخاطب</th>
-                <th className="p-3 w-32">شماره تماس</th>
-                <th className="p-3 w-32">وضعیت</th>
-                <th className="p-3 w-28">منبع</th>
-                <th className="p-3 min-w-[220px]">آخرین پیگیری / اپراتور</th>
-                <th className="p-3 w-36">وضعیت هشدار</th>
+                <th className="p-3 w-28 relative" {...columns.thProps('code')}>
+                  کد سرنخ
+                  {columns.renderHandle('code')}
+                </th>
+                <th className="p-3 relative" {...columns.thProps('name')}>
+                  نام و مخاطب
+                  {columns.renderHandle('name')}
+                </th>
+                <th className="p-3 w-32 relative" {...columns.thProps('mobile')}>
+                  شماره تماس
+                  {columns.renderHandle('mobile')}
+                </th>
+                <th className="p-3 w-32 relative" {...columns.thProps('status')}>
+                  وضعیت
+                  {columns.renderHandle('status')}
+                </th>
+                <th className="p-3 w-28 relative" {...columns.thProps('registrationDate')}>
+                  تاریخ ثبت اولیه
+                  {columns.renderHandle('registrationDate')}
+                </th>
+                <th className="p-3 w-28 relative" {...columns.thProps('source')}>
+                  منبع
+                  {columns.renderHandle('source')}
+                </th>
+                <th className="p-3 min-w-[220px] relative" {...columns.thProps('followUp')}>
+                  آخرین پیگیری / اپراتور
+                  {columns.renderHandle('followUp')}
+                </th>
+                <th className="p-3 w-36 relative" {...columns.thProps('alert')}>
+                  وضعیت هشدار
+                  {columns.renderHandle('alert')}
+                </th>
+                {/* Trailing action column is intentionally not resizable: it is
+                    the table's edge and has no boundary to drag. */}
                 <th className="p-3 text-left w-52">اقدامات</th>
               </tr>
             </thead>
@@ -303,6 +353,11 @@ export const LeadList: React.FC<LeadListProps> = ({
                     {/* Status */}
                     <td className="p-3 whitespace-nowrap">
                       {getStatusBadge(lead.status)}
+                    </td>
+
+                    {/* Registration Date */}
+                    <td className="p-3 font-mono text-[11px] text-slate-500 dark:text-slate-400 whitespace-nowrap" dir="ltr">
+                      {formatPersianDate(lead.registrationDate || lead.createdAt, true)}
                     </td>
 
                     {/* Source */}
@@ -406,7 +461,7 @@ export const LeadList: React.FC<LeadListProps> = ({
               })}
             </tbody>
           </table>
-        </div>
+        </HorizontalScrollContainer>
       ) : (
         /* CARD VIEW */
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
@@ -442,6 +497,14 @@ export const LeadList: React.FC<LeadListProps> = ({
                       {lead.mobile}
                     </span>
                   </div>
+                </div>
+
+                {/* Source & initial registration date */}
+                <div className="flex items-center justify-between gap-2 mt-2 text-[11px] text-slate-500 dark:text-slate-400" data-testid="lead-meta-card">
+                  <span>منبع: <span className="text-slate-700 dark:text-slate-300 font-semibold">{lead.source || 'تماس ورودی'}</span></span>
+                  <span className="font-mono" dir="ltr">
+                    ثبت: {formatPersianDate(lead.registrationDate || lead.createdAt, true)}
+                  </span>
                 </div>
 
                 {/* DUPLICATE CALL WARNING BANNER (CARD) */}
@@ -605,7 +668,15 @@ export const LeadList: React.FC<LeadListProps> = ({
             value={quickSource}
             onChange={(e) => setQuickSource(e.target.value)}
             placeholder="تماس ورودی، وبسایت، تبلیغات، ..."
+            list="lead-sources"
           />
+          <datalist id="lead-sources">
+            <option value="تماس ورودی" />
+            <option value="وبسایت" />
+            <option value="تبلیغات" />
+            <option value="معرفی مشتری" />
+            <option value="شبکه‌های اجتماعی" />
+          </datalist>
 
           <div>
             <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 block mb-1">

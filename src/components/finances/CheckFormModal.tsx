@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Modal } from '../ui/Modal';
 import { CheckItem, CheckType, CheckStatus, Customer } from '../../types';
+import { useCustomerCreationHandoff, CUSTOMER_CREATE_VALUE, customerCreateOption } from '../customers/useCustomerCreationHandoff';
 import { Input } from '../ui/Input';
 import { Textarea } from '../ui/Textarea';
 import { Select } from '../ui/Select';
@@ -43,10 +44,13 @@ export const CheckFormModal: React.FC<CheckFormModalProps> = ({
   const [customerId, setCustomerId] = useState('');
   const [status, setStatus] = useState<CheckStatus>(CheckStatus.IN_SAFE);
   const [notes, setNotes] = useState('');
+  // "Create customer" handoff — this form stays mounted underneath the customer
+  // modal, so the draft (amount, dates, issuer, notes) survives the round-trip.
+  const customerHandoff = useCustomerCreationHandoff();
 
   useEffect(() => {
     if (checkToEdit) {
-      setType(checkToEdit.type || CheckType.RECEIVED);
+      setType((checkToEdit.type || CheckType.RECEIVED) as CheckType);
       setCheckNumber(checkToEdit.checkNumber || '');
       setSayadNumber(checkToEdit.sayadNumber || '');
       setBankName(checkToEdit.bankName || '');
@@ -55,7 +59,7 @@ export const CheckFormModal: React.FC<CheckFormModalProps> = ({
       setDueDate(checkToEdit.dueDate ? checkToEdit.dueDate.substring(0, 10) : '');
       setIssuerName(checkToEdit.issuerName || '');
       setCustomerId(checkToEdit.customerId || '');
-      setStatus(checkToEdit.status || CheckStatus.IN_SAFE);
+      setStatus((checkToEdit.status || CheckStatus.IN_SAFE) as CheckStatus);
       setNotes(checkToEdit.notes || '');
     } else {
       setType(CheckType.RECEIVED);
@@ -72,7 +76,7 @@ export const CheckFormModal: React.FC<CheckFormModalProps> = ({
       setStatus(CheckStatus.IN_SAFE);
       setNotes('');
     }
-  }, [checkToEdit, initialCustomer, allCustomers, isOpen]);
+  }, [checkToEdit, initialCustomer, isOpen]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -119,6 +123,7 @@ export const CheckFormModal: React.FC<CheckFormModalProps> = ({
   const rawAmount = Number(amount.replace(/,/g, '')) || 0;
 
   return (
+    <>
     <Modal
       isOpen={isOpen}
       onClose={onClose}
@@ -161,11 +166,19 @@ export const CheckFormModal: React.FC<CheckFormModalProps> = ({
             label={t('checks.customer')}
             value={customerId}
             onChange={(e) => {
+              if (e.target.value === CUSTOMER_CREATE_VALUE) {
+                customerHandoff.open((c) => {
+                  setCustomerId(c.id);
+                  setIssuerName((prev) => prev || c.name || '');
+                });
+                return;
+              }
               setCustomerId(e.target.value);
               const cust = (allCustomers || []).find((c) => c.id === e.target.value);
               if (cust && !issuerName) setIssuerName(cust.name);
             }}
             options={[
+              customerCreateOption(),
               { value: '', label: isRtl ? 'بدون مشتری' : 'No customer' },
               ...(allCustomers || []).map((c) => ({
                 value: c.id,
@@ -261,5 +274,7 @@ export const CheckFormModal: React.FC<CheckFormModalProps> = ({
         </div>
       </form>
     </Modal>
+      {customerHandoff.modal}
+    </>
   );
 };

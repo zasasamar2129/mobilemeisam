@@ -21,7 +21,7 @@ export const TabletSidebar: React.FC<TabletSidebarProps> = ({
 
   return (
     <aside
-      className={`hidden md:flex lg:hidden bg-surface border-e border-primary flex-col h-full min-h-0 overflow-hidden shrink-0 transition-all duration-300 z-20 select-none ${
+      className={`tablet-sidebar hidden md:flex lg:hidden bg-surface border-e border-primary flex-col h-full min-h-0 overflow-hidden shrink-0 transition-all duration-300 z-20 select-none ${
         isExpanded ? 'w-56' : 'w-[64px]'
       }`}
       aria-label={t('nav.group.main')}

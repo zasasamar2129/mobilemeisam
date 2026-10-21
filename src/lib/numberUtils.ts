@@ -1,6 +1,23 @@
 import { toPersianDigits } from './dateUtils';
 
 /**
+ * Persian / Arabic digits normalizer
+ */
+export const normalizePersianNumbers = (val: string): string => {
+  if (!val) return '';
+  return val
+    .replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 1776))
+    .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 1632));
+};
+
+/**
+ * Strips non-digit characters and normalizes Persian/Arabic numerals to ASCII.
+ */
+export const cleanDigits = (val: string): string => {
+  return normalizePersianNumbers(val).replace(/[^0-9]/g, '');
+};
+
+/**
  * Ensures any numeric or alphanumeric string (phone number, Sayad ID, ICCID, tracking code)
  * retains strict LTR ordering and proper visual presentation inside RTL layouts.
  */

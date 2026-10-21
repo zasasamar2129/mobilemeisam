@@ -729,6 +729,13 @@ class ApiClient {
     });
   }
 
+  public async saveWordpressSyncSettings(settings: any) {
+    return this.request<{ success: boolean; settings: any }>('/wordpress/settings', {
+      method: 'PUT',
+      body: JSON.stringify(settings),
+    });
+  }
+
   // ----------------------------------------------------
   // Full System Backup & Restore Engine
   // ----------------------------------------------------
@@ -975,6 +982,27 @@ class ApiClient {
     return this.request<{ success: boolean; message: ChatMessage }>(`/conversations/${conversationId}/messages/${messageId}`, {
       method: 'PUT',
       body: JSON.stringify({ body }),
+    });
+  }
+
+  public async setConversationTyping(conversationId: string, isTyping: boolean) {
+    return this.request<{ success: boolean; conversation: ChatConversation; revision: number }>(
+      `/conversations/${conversationId}/typing`,
+      { method: 'POST', body: JSON.stringify({ isTyping }) }
+    );
+  }
+
+  public async sendPresenceHeartbeat() {
+    return this.request<{ success: boolean; user: User; revision: number }>('/presence', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  }
+
+  public async toggleChatMessageReaction(conversationId: string, messageId: string, emoji: string) {
+    return this.request<{ success: boolean; message: ChatMessage }>(`/conversations/${conversationId}/messages/${messageId}/reactions`, {
+      method: 'POST',
+      body: JSON.stringify({ emoji }),
     });
   }
 

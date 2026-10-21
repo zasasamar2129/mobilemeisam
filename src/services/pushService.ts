@@ -2,6 +2,9 @@ import { UserNotificationDevice, NotificationSettings } from '../types';
 
 export type SoundType = 'crystal' | 'bell' | 'subtle' | 'urgent';
 
+/** Set once the automatic permission prompt has been shown in this browser. */
+const AUTO_PROMPT_KEY = 'mmba_push_auto_prompted';
+
 function urlBase64ToUint8Array(base64String: string): Uint8Array {
   const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
   const base64 = (base64String + padding).replace(/\-/g, '+').replace(/_/g, '/');
@@ -13,6 +16,27 @@ function urlBase64ToUint8Array(base64String: string): Uint8Array {
   return outputArray;
 }
 
+export function isIos(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const nav = navigator as Navigator & { userAgentData?: { platform?: string } };
+  const platform = nav.userAgentData?.platform || nav.platform || '';
+  if (/iPhone|iPad|iPod/i.test(platform)) return true;
+  // iPadOS reports a desktop "Macintosh" UA; the touch-point check disambiguates it.
+  return /Macintosh/i.test(nav.userAgent) && 'ontouchend' in document;
+}
+
+export function isStandalone(): boolean {
+  if (typeof window === 'undefined') return false;
+  const nav = navigator as Navigator & { standalone?: boolean };
+  return nav.standalone === true || window.matchMedia('(display-mode: standalone)').matches;
+}
+
+/** iOS 16.4+ Web Push: requires PushManager *and* installation to the home screen. */
+export function isIosPushSupported(): boolean {
+  if (!isIos()) return true;
+  return isStandalone() && 'PushManager' in window;
+}
+
 export function detectDeviceInfo(): {
   deviceName: string;
   deviceType: 'DESKTOP' | 'MOBILE' | 'TABLET';
@@ -21,9 +45,11 @@ export function detectDeviceInfo(): {
 } {
   const ua = navigator.userAgent;
   let deviceType: 'DESKTOP' | 'MOBILE' | 'TABLET' = 'DESKTOP';
-  if (/iPad|Tablet/i.test(ua)) {
+  if (/iPad|Tablet/i.test(ua) || (isIos() && /iPad/i.test((navigator as any).platform || ''))) {
     deviceType = 'TABLET';
-  } else if (/Mobi|Android|iPhone/i.test(ua)) {
+  } else if (/Mobi|Android|iPhone/i.test(ua) || isIos()) {
+    // An installed iOS PWA reports a Macintosh UA, which would otherwise be
+    // classified as DESKTOP and shown the wrong device label.
     deviceType = 'MOBILE';
   }
 
@@ -134,6 +160,22 @@ class PushService {
   private swRegistration: ServiceWorkerRegistration | null = null;
   private currentDevice: UserNotificationDevice | null = null;
 
+  /**
+   * The notification endpoints require an authenticated caller (getAuthUser reads
+   * the Authorization header), so every request here must carry the session token.
+   * Same localStorage key api.ts reads, so login/logout stay in step.
+   */
+  private authHeaders(): Record<string, string> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    try {
+      const token = localStorage.getItem('mmba_auth_token');
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+    } catch {
+      /* private mode — the request will 401 and be reported to the caller */
+    }
+    return headers;
+  }
+
   public isSupported(): boolean {
     return (
       typeof window !== 'undefined' &&
@@ -164,7 +206,14 @@ class PushService {
     if (!this.isSupported()) return null;
     try {
       this.swRegistration = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
-      await navigator.serviceWorker.ready;
+      // navigator.serviceWorker.ready never rejects; if the worker never activates
+      // it would hang forever, so race it against a timeout.
+      await Promise.race([
+        navigator.serviceWorker.ready,
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('سرویس‌ورکر در زمان مقرر فعال نشد.')), 10000)
+        ),
+      ]);
       return this.swRegistration;
     } catch (err) {
       console.error('[PushService] Failed to register service worker:', err);
@@ -174,7 +223,7 @@ class PushService {
 
   public async fetchVapidPublicKey(): Promise<string | null> {
     try {
-      const res = await fetch('/api/v1/notifications/vapid-public-key');
+      const res = await fetch('/api/v1/notifications/vapid-public-key', { headers: this.authHeaders() });
       const data = await res.json();
       return data.publicKey || null;
     } catch (err) {
@@ -189,6 +238,15 @@ class PushService {
   ): Promise<{ success: boolean; device?: UserNotificationDevice; error?: string }> {
     if (!this.isSupported()) {
       return { success: false, error: 'مرورگر شما از اعلان‌های وب (Web Push) پشتیبانی نمی‌کند.' };
+    }
+
+    // iOS exposes PushManager in a normal Safari tab, but subscribe() then throws
+    // InvalidStateError. Detect that up front and explain the real requirement.
+    if (!isIosPushSupported()) {
+      return {
+        success: false,
+        error: 'برای دریافت اعلان در آیفون و آیپد، ابتدا برنامه را از طریق دکمه اشتراک‌گذاری مرورگر به صفحه اصلی (Add to Home Screen) اضافه کنید و سپس دوباره تلاش نمایید.',
+      };
     }
 
     try {
@@ -209,6 +267,18 @@ class PushService {
 
       const applicationServerKey = urlBase64ToUint8Array(publicKey);
       let subscription = await reg.pushManager.getSubscription();
+
+      // A subscription created under a different VAPID key can never receive again
+      // and gets pruned as 410. Re-subscribe whenever the key no longer matches.
+      if (subscription) {
+        const existingKey = (subscription.options as any)?.applicationServerKey;
+        const sameKey =
+          existingKey && urlBase64ToUint8Array(publicKey).every((b, i) => existingKey[i] === b);
+        if (!sameKey) {
+          await subscription.unsubscribe().catch(() => {});
+          subscription = null;
+        }
+      }
 
       if (!subscription) {
         subscription = await reg.pushManager.subscribe({
@@ -238,7 +308,7 @@ class PushService {
 
       const res = await fetch('/api/v1/notifications/devices/register', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.authHeaders(),
         body: JSON.stringify(devicePayload),
       });
 
@@ -253,10 +323,35 @@ class PushService {
     }
   }
 
+  /**
+   * Ask for notification permission automatically, once per browser.
+   *
+   * Browsers want requestPermission() to follow a user gesture, but in practice
+   * Chrome/Firefox still honour it from a same-session code path after login —
+   * the gesture requirement is enforced strictly on iOS, which is skipped below
+   * unless the app is installed. The localStorage guard means a user who dismisses
+   * is never asked again, so this cannot become nagging.
+   */
+  public async autoSubscribeIfPermitted(userId: string, userName?: string): Promise<void> {
+    if (typeof window === 'undefined') return;
+    if (!this.isSupported()) return;
+    try {
+      if (Notification.permission !== 'default') return;
+      if (!isIosPushSupported()) return;
+      if (localStorage.getItem(AUTO_PROMPT_KEY)) return;
+      // Mark before awaiting so a double-invocation cannot open two prompts.
+      localStorage.setItem(AUTO_PROMPT_KEY, '1');
+      await this.initServiceWorker();
+      await this.subscribeUser(userId, userName);
+    } catch (err) {
+      console.warn('[PushService] Auto subscribe skipped:', err);
+    }
+  }
+
   public async getRegisteredDevices(userId?: string): Promise<UserNotificationDevice[]> {
     try {
       const url = userId ? `/api/v1/notifications/devices?userId=${encodeURIComponent(userId)}` : '/api/v1/notifications/devices';
-      const res = await fetch(url);
+      const res = await fetch(url, { headers: this.authHeaders() });
       const data = await res.json();
       return data.devices || [];
     } catch (err) {
@@ -269,7 +364,7 @@ class PushService {
     try {
       const res = await fetch(`/api/v1/notifications/devices/${deviceId}/toggle`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.authHeaders(),
         body: JSON.stringify({ enabled }),
       });
       const data = await res.json();
@@ -282,8 +377,16 @@ class PushService {
 
   public async deleteDevice(deviceId: string): Promise<boolean> {
     try {
+      // Drop the browser-side subscription too. Leaving it live means the endpoint
+      // keeps existing and 410s on every future send attempt.
+      if ('serviceWorker' in navigator) {
+        const reg = await navigator.serviceWorker.getRegistration();
+        const sub = await reg?.pushManager?.getSubscription();
+        await sub?.unsubscribe().catch(() => {});
+      }
       const res = await fetch(`/api/v1/notifications/devices/${deviceId}`, {
         method: 'DELETE',
+        headers: this.authHeaders(),
       });
       const data = await res.json();
       return !!data.success;
@@ -301,7 +404,7 @@ class PushService {
     try {
       const res = await fetch('/api/v1/notifications/test-push', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.authHeaders(),
         body: JSON.stringify({ userId, title, body }),
       });
       const data = await res.json();
@@ -316,7 +419,7 @@ class PushService {
     try {
       const res = await fetch(`/api/v1/notifications/${notificationId}/snooze`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.authHeaders(),
         body: JSON.stringify({ minutes }),
       });
       const data = await res.json();
@@ -361,7 +464,7 @@ class PushService {
     try {
       const res = await fetch('/api/v1/notifications/settings', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.authHeaders(),
         body: JSON.stringify(settings),
       });
       const data = await res.json();

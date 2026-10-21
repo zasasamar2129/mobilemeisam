@@ -7,12 +7,12 @@ import {
   RegisteredHolder, ContractInstallment, InstallmentStatus, TrustedBiometricDevice,
   LeadActivity, LeadFollowUpSummary, LeadActivityType,
   Consignment, ConsignmentContact,
-  ChatConversation, ChatMessage, ConversationType, ChatMemberRole, MessageStatus, NoteType,
+  ChatConversation, ChatMessage, ConversationType, ChatMemberRole, MessageStatus, NoteType, ChatMessageReaction,
   SimPurchase, SimPurchasePayment, SimPurchaseReturn, SimSalePayment, SimSaleReturn,
   SimCostItem, SimFinancialSummary, SimPaymentMethod, SimPurchaseStatus
 } from '../types';
 import { computeSimFinancial, getCurrentPurchase, deriveTimelineItems } from '../lib/simFinancial';
-import { DEFAULT_ROLES } from '../lib/permissions';
+import { DEFAULT_ROLES, canViewTask } from '../lib/permissions';
 import { normalizePhoneNumber } from '../lib/numberUtils';
 import { gregorianToJalali } from '../lib/dateUtils';
 import { api } from './api';
@@ -47,6 +47,27 @@ export interface SyncStatus {
 
 type ListenerCallback = (data: any) => void;
 const listeners: Set<ListenerCallback> = new Set();
+
+/**
+ * Log a rejected sync so the actual reason is visible.
+ *
+ * `console.error('...', err)` prints `{}` when the rejection is a Response or
+ * another object with no enumerable properties, which hides the cause. This
+ * serialises non-Error values so the real message shows up in the console.
+ */
+function logSyncFailure(label: string, err: unknown) {
+  if (err instanceof Error) {
+    console.error(`[Sync] ${label}:`, err.message, err);
+  } else {
+    let detail = '';
+    try {
+      detail = JSON.stringify(err);
+    } catch {
+      detail = String(err);
+    }
+    console.error(`[Sync] ${label}:`, detail || '(unserialisable value)', err);
+  }
+}
 
 function emitChange(event: { key: string; action: string; payload?: any }) {
   listeners.forEach((fn) => {
@@ -123,6 +144,16 @@ class CentralStorageService {
     this.startBackgroundSync();
   }
 
+  // The snapshot key is shared by every account that has used this browser, but
+  // the server only sends a caller the tasks they may see. Re-filtering on read
+  // stops a previously-signed-in admin's full task table from appearing to an
+  // employee on a session restore (and from persisting while offline).
+  private snapshotTasksForUser(tasks: Task[]): Task[] {
+    const user = this.currentUser;
+    if (!user) return [];
+    return (tasks || []).filter((t) => canViewTask(user, t));
+  }
+
   // Load transient offline cache from browser storage for zero-flicker startup
   private loadLocalCache(): void {
     try {
@@ -189,6 +220,11 @@ class CentralStorageService {
         const matched = this.users.find((user) => user.id === u.id);
         this.currentUser = matched || u;
       }
+
+      // Must run after currentUser is restored: the snapshot key is shared by
+      // every account on this browser, so a cached admin task table would
+      // otherwise surface to an employee on a session restore.
+      this.tasks = this.snapshotTasksForUser(this.tasks);
 
       // Restore a valid persisted session on reload, while still requiring credentials
       // on a fresh tab that has no persistent login. Guards: stored login flag + a
@@ -364,6 +400,8 @@ class CentralStorageService {
       try {
         const ver = await api.getSyncVersion();
         this.isConnected = true;
+        // Presence rides the same cadence — one heartbeat per poll keeps peers accurate.
+        this.sendPresenceHeartbeat();
         if (ver.revision !== this.currentRevision) {
           await this.syncWithServer(false);
         }
@@ -419,7 +457,7 @@ class CentralStorageService {
         this.consignments = (res.data as any).consignments || this.consignments;
         this.conversations = (res.data as any).conversations || this.conversations;
         this.chatMessages = (res.data as any).chatMessages || this.chatMessages;
-        this.settings = res.data.settings || this.settings;
+        this.settings = { ...this.settings, ...res.data.settings };
 
         // Keep current active user profile in sync if modified on another device
         const updatedSelf = this.users.find(
@@ -565,6 +603,22 @@ class CentralStorageService {
     return this.autoLockMinutes;
   }
 
+  public getWordpressSyncSettings(): { enabled: boolean; apiUrl: string; syncSecret: string; timeoutMs: number } {
+    return this.settings.wordpressSync || {
+      enabled: false,
+      apiUrl: '',
+      syncSecret: '',
+      timeoutMs: 10000,
+    };
+  }
+
+  public saveWordpressSyncSettings(data: { enabled: boolean; apiUrl: string; syncSecret: string; timeoutMs: number }): void {
+    this.settings.wordpressSync = data;
+    this.saveLocalCacheSnapshot();
+    emitChange({ key: 'WORDPRESS_SYNC_SETTINGS', action: 'UPDATE', payload: data });
+    api.saveWordpressSyncSettings(data).catch((err) => logSyncFailure('wordpress settings to server:', err));
+  }
+
   public setAutoLockMinutes(minutes: number): void {
     this.autoLockMinutes = minutes;
     this.saveLocalCacheSnapshot();
@@ -650,7 +704,7 @@ class CentralStorageService {
     emitChange({ key: 'USERS', action: 'SAVE', payload: updatedUser });
 
     // Central Server Sync
-    api.saveUser(updatedUser).catch((err) => console.error('Failed to sync user to server:', err));
+    api.saveUser(updatedUser).catch((err) => logSyncFailure('user to server:', err));
   }
 
   public async deleteUser(id: string): Promise<boolean> {
@@ -693,7 +747,7 @@ class CentralStorageService {
     }
     this.saveLocalCacheSnapshot();
     emitChange({ key: 'ROLES', action: 'UPDATE', payload: role });
-    api.saveRole(role).catch((err) => console.error('Failed to sync role to server:', err));
+    api.saveRole(role).catch((err) => logSyncFailure('role to server:', err));
   }
 
   // ----------------------------------------------------
@@ -762,7 +816,7 @@ class CentralStorageService {
     emitChange({ key: 'CUSTOMERS', action: 'SAVE', payload: updatedCustomer });
 
     // Sync to centralized server DB
-    api.saveCustomer(updatedCustomer).catch((err) => console.error('Failed to sync customer to server:', err));
+    api.saveCustomer(updatedCustomer).catch((err) => logSyncFailure('customer to server:', err));
     return updatedCustomer;
   }
 
@@ -983,7 +1037,7 @@ class CentralStorageService {
 
     this.saveLocalCacheSnapshot();
     emitChange({ key: 'LEADS', action: 'SAVE', payload: savedLead });
-    api.saveLead(savedLead).catch((err) => console.error('Failed to sync lead to server:', err));
+    api.saveLead(savedLead).catch((err) => logSyncFailure('lead to server:', err));
     return savedLead;
   }
 
@@ -1113,7 +1167,7 @@ class CentralStorageService {
 
     this.saveLocalCacheSnapshot();
     emitChange({ key: 'LEADS', action: 'ACTIVITY_ADDED', payload: { lead, activity, task: createdTask } });
-    api.saveLead(lead).catch((err) => console.error('Failed to sync lead activity to server:', err));
+    api.saveLead(lead).catch((err) => logSyncFailure('lead activity to server:', err));
 
     return { activity, lead, task: createdTask };
   }
@@ -1248,7 +1302,7 @@ class CentralStorageService {
     this.saveLocalCacheSnapshot();
     emitChange({ key: 'CALLS', action: 'CREATE', payload: newCall });
 
-    api.saveCall(newCall).catch((err) => console.error('Failed to sync call to server:', err));
+    api.saveCall(newCall).catch((err) => logSyncFailure('call to server:', err));
     return newCall;
   }
 
@@ -1320,7 +1374,7 @@ class CentralStorageService {
     this.saveLocalCacheSnapshot();
     emitChange({ key: 'VOICE_NOTES', action: 'SAVE', payload: savedNote });
 
-    api.saveVoiceNote(savedNote).catch((err) => console.error('Failed to sync voice note to server:', err));
+    api.saveVoiceNote(savedNote).catch((err) => logSyncFailure('voice note to server:', err));
     return savedNote;
   }
 
@@ -1366,7 +1420,7 @@ class CentralStorageService {
     this.saveLocalCacheSnapshot();
     emitChange({ key: 'TASKS', action: 'SAVE', payload: updatedTask });
 
-    api.saveTask(updatedTask).catch((err) => console.error('Failed to sync task to server:', err));
+    api.saveTask(updatedTask).catch((err) => logSyncFailure('task to server:', err));
     return updatedTask;
   }
 
@@ -1411,7 +1465,7 @@ class CentralStorageService {
     this.saveLocalCacheSnapshot();
     emitChange({ key: 'CONTRACTS', action: 'SAVE', payload: updatedContract });
 
-    api.saveContract(updatedContract).catch((err) => console.error('Failed to sync contract to server:', err));
+    api.saveContract(updatedContract).catch((err) => logSyncFailure('contract to server:', err));
     return updatedContract;
   }
 
@@ -1455,7 +1509,7 @@ class CentralStorageService {
     this.saveLocalCacheSnapshot();
     emitChange({ key: 'PAYMENTS', action: 'SAVE', payload: updatedPayment });
 
-    api.savePayment(updatedPayment).catch((err) => console.error('Failed to sync payment to server:', err));
+    api.savePayment(updatedPayment).catch((err) => logSyncFailure('payment to server:', err));
     return updatedPayment;
   }
 
@@ -1515,7 +1569,7 @@ class CentralStorageService {
     this.saveLocalCacheSnapshot();
     emitChange({ key: 'CHECKS', action: 'SAVE', payload: updatedCheck });
 
-    api.saveCheck(updatedCheck).catch((err) => console.error('Failed to sync check to server:', err));
+    api.saveCheck(updatedCheck).catch((err) => logSyncFailure('check to server:', err));
     return updatedCheck;
   }
 
@@ -1574,7 +1628,7 @@ class CentralStorageService {
     this.saveLocalCacheSnapshot();
     emitChange({ key: 'SIMS', action: 'SAVE', payload: updatedSim });
 
-    api.saveSim(updatedSim).catch((err) => console.error('Failed to sync SIM to server:', err));
+    api.saveSim(updatedSim).catch((err) => logSyncFailure('SIM to server:', err));
     return updatedSim;
   }
 
@@ -1635,7 +1689,7 @@ class CentralStorageService {
     this.saveLocalCacheSnapshot();
     emitChange({ key: 'REPAIRS', action: 'SAVE', payload: updatedRepair });
 
-    api.saveRepair(updatedRepair).catch((err) => console.error('Failed to sync repair to server:', err));
+    api.saveRepair(updatedRepair).catch((err) => logSyncFailure('repair to server:', err));
     return updatedRepair;
   }
 
@@ -1703,7 +1757,7 @@ class CentralStorageService {
     this.saveLocalCacheSnapshot();
     emitChange({ key: 'ATTACHMENTS', action: 'SAVE', payload: updatedAtt });
 
-    api.saveAttachment(updatedAtt).catch((err) => console.error('Failed to sync attachment to server:', err));
+    api.saveAttachment(updatedAtt).catch((err) => logSyncFailure('attachment to server:', err));
     return updatedAtt;
   }
 
@@ -1745,7 +1799,7 @@ class CentralStorageService {
     this.saveLocalCacheSnapshot();
     emitChange({ key: 'ATTACHMENTS', action: 'SAVE', payload: updatedAtt });
     api.updateAttachmentThumbnail(id, thumbnailDataUrl, uploadStatus).catch((err) =>
-      console.error('Failed to sync attachment thumbnail to server:', err)
+      logSyncFailure('attachment thumbnail', err)
     );
     return updatedAtt;
   }
@@ -1877,7 +1931,7 @@ class CentralStorageService {
     }
     this.saveLocalCacheSnapshot();
     emitChange({ key: 'NOTIFICATIONS', action: 'SAVE', payload: updated });
-    api.saveNotification(updated).catch((err) => console.error('Failed to sync notification to server:', err));
+    api.saveNotification(updated).catch((err) => logSyncFailure('notification to server:', err));
     return updated;
   }
 
@@ -2506,7 +2560,7 @@ class CentralStorageService {
     emitChange({ key: 'CHAT_MESSAGES', action: 'SEND', payload: optimistic });
     emitChange({ key: 'CHAT_CONVERSATIONS', action: 'UPDATE', payload: convs[ci] });
 
-    api.sendChatMessage(conversationId, optimistic).catch((err) => console.error('Failed to sync chat message:', err));
+    api.sendChatMessage(conversationId, optimistic).catch((err) => logSyncFailure('chat message:', err));
     return optimistic;
   }
 
@@ -2641,6 +2695,218 @@ class CentralStorageService {
       emitChange({ key: 'CHAT_MESSAGES', action: 'UPDATE', payload: msgs[idx] });
     }
     try { await api.editChatMessage(conversationId, messageId, body); return true; } catch { return false; }
+  }
+
+  // ----------------------------------------------------
+  // Typing & Presence
+  // ----------------------------------------------------
+  /** Local echo so the composer feels instant; the server value arrives via sync. */
+  private localTyping = new Map<string, { isTyping: boolean; timer: ReturnType<typeof setTimeout> | null }>();
+
+  /** Throttled: at most one POST per 2s while typing, plus an auto-clear. */
+  public setChatTyping(conversationId: string, isTyping: boolean): void {
+    const key = `${conversationId}`;
+    const prev = this.localTyping.get(key);
+    if (prev?.timer) clearTimeout(prev.timer);
+
+    if (!isTyping) {
+      this.localTyping.set(key, { isTyping: false, timer: null });
+      this.patchLocalTyping(conversationId, this.currentUser?.id ?? '', false);
+      api.setConversationTyping(conversationId, false).catch(() => {});
+      return;
+    }
+
+    this.patchLocalTyping(conversationId, this.currentUser?.id ?? '', true);
+    // Only fire the network call if we weren't already typing (avoids a POST per keystroke).
+    if (!prev?.isTyping) {
+      api.setConversationTyping(conversationId, true).catch(() => {});
+    }
+    const timer = setTimeout(() => this.setChatTyping(conversationId, false), 4000);
+    this.localTyping.set(key, { isTyping: true, timer });
+  }
+
+  private patchLocalTyping(conversationId: string, userId: string, isTyping: boolean): void {
+    if (!userId) return;
+    const convo = (this.conversations || []).find((c) => c.id === conversationId);
+    if (!convo) return;
+    const m = (convo.members || []).find((x) => x.user_id === userId);
+    if (!m) return;
+    m.is_typing = isTyping;
+    m.isTyping = isTyping;
+    m.typing_at = isTyping ? new Date().toISOString() : undefined;
+    m.typingAt = m.typing_at;
+    emitChange({ key: 'CHAT_CONVERSATIONS', action: 'UPDATE', payload: convo });
+  }
+
+  // ----------------------------------------------------
+  // Live SSE stream apply methods (instant client-side mutation)
+  // ----------------------------------------------------
+  public applyLiveChatMessage(conversationId: string, msg: ChatMessage): void {
+    if (!msg || !msg.id) return;
+    const exists = (this.chatMessages || []).some((m) => m.id === msg.id);
+    if (exists) return; // already in local cache (e.g. optimistic or prior poll)
+
+    this.chatMessages = [...(this.chatMessages || []), msg];
+    // bump conversation preview
+    const convs = this.conversations || [];
+    const ci = convs.findIndex((c) => c.id === conversationId);
+    if (ci >= 0) {
+      convs[ci] = {
+        ...convs[ci],
+        last_message: msg.body,
+        lastMessage: msg.body,
+        last_message_at: msg.created_at || msg.createdAt,
+        lastMessageAt: msg.created_at || msg.createdAt,
+        last_message_user_id: msg.sender_user_id || msg.senderUserId,
+        lastMessageUserId: msg.sender_user_id || msg.senderUserId,
+        last_message_user_name: msg.sender_user_name || msg.senderUserName,
+        lastMessageUserName: msg.sender_user_name || msg.senderUserName,
+        updated_at: msg.created_at || msg.createdAt,
+      };
+    }
+    this.saveLocalCacheSnapshot();
+    emitChange({ key: 'CHAT_MESSAGES', action: 'SEND', payload: msg });
+    if (ci >= 0) emitChange({ key: 'CHAT_CONVERSATIONS', action: 'UPDATE', payload: convs[ci] });
+  }
+
+  public applyLiveMessageEdit(conversationId: string, messageId: string, newBody: string): void {
+    const msgs = this.chatMessages || [];
+    const idx = msgs.findIndex((m) => m.id === messageId);
+    if (idx < 0) return;
+    msgs[idx] = {
+      ...msgs[idx],
+      body: newBody,
+      body_text: newBody,
+      is_edited: true,
+      isEdited: true,
+      updated_at: new Date().toISOString(),
+    };
+    this.saveLocalCacheSnapshot();
+    emitChange({ key: 'CHAT_MESSAGES', action: 'EDIT', payload: msgs[idx] });
+  }
+
+  public applyLiveMessageDelete(conversationId: string, messageId: string, reason?: string): void {
+    const msgs = this.chatMessages || [];
+    const idx = msgs.findIndex((m) => m.id === messageId);
+    if (idx < 0) return;
+    msgs[idx] = {
+      ...msgs[idx],
+      is_deleted: true,
+      isDeleted: true,
+      deletion_reason: reason,
+      updated_at: new Date().toISOString(),
+    };
+    this.saveLocalCacheSnapshot();
+    emitChange({ key: 'CHAT_MESSAGES', action: 'DELETE', payload: { messageId, reason } });
+  }
+
+  public applyLiveMessageReaction(conversationId: string, updatedMessage: ChatMessage): void {
+    if (!updatedMessage?.id) return;
+    const msgs = this.chatMessages || [];
+    const idx = msgs.findIndex((m) => m.id === updatedMessage.id);
+    if (idx >= 0) {
+      msgs[idx] = updatedMessage;
+    }
+    this.saveLocalCacheSnapshot();
+    emitChange({ key: 'CHAT_MESSAGES', action: 'REACTION', payload: updatedMessage });
+  }
+
+  public applyLiveTyping(conversationId: string, userId: string, isTyping: boolean): void {
+    this.patchLocalTyping(conversationId, userId, isTyping);
+  }
+
+  public applyLiveConversationRead(conversationId: string, readerUserId: string): void {
+    const convs = this.conversations || [];
+    const ci = convs.findIndex((c) => c.id === conversationId);
+    if (ci < 0) return;
+    const msgs = this.chatMessages || [];
+    let changed = false;
+    this.chatMessages = msgs.map((m) => {
+      if ((m.conversation_id || m.conversationId) !== conversationId) return m;
+      const readBy = m.read_by_user_ids || m.readByUserIds || [];
+      if (readBy.includes(readerUserId)) return m;
+      const updated = [...readBy, readerUserId];
+      const allRead = updated.length >= ((convs[ci].member_ids || []).length - 1);
+      changed = true;
+      return {
+        ...m,
+        read_by_user_ids: updated,
+        readByUserIds: updated,
+        status: allRead ? MessageStatus.READ : m.status,
+      };
+    });
+    if (changed) {
+      this.saveLocalCacheSnapshot();
+      emitChange({ key: 'CHAT_MESSAGES', action: 'READ', payload: { conversationId, readerUserId } });
+    }
+  }
+
+  public isUserTypingIn(conversationId: string, userId: string): boolean {
+    const convo = (this.conversations || []).find((c) => c.id === conversationId);
+    const m = (convo?.members || []).find((x) => x.user_id === userId);
+    return !!(m && (m.is_typing || m.isTyping));
+  }
+
+  public getTypingUserIds(conversationId: string, excludeUserId: string): string[] {
+    const convo = (this.conversations || []).find((c) => c.id === conversationId);
+    if (!convo) return [];
+    return (convo.members || [])
+      .filter((m) => m.user_id !== excludeUserId && (m.is_typing || m.isTyping))
+      .map((m) => m.user_id);
+  }
+
+  public isUserOnline(userId: string): boolean {
+    const u = (this.users || []).find((x) => x.id === userId);
+    return !!(u && (u.is_online ?? u.isOnline));
+  }
+
+  public getUserLastSeen(userId: string): string | undefined {
+    const u = (this.users || []).find((x) => x.id === userId);
+    return u?.last_seen_at || u?.lastSeenAt;
+  }
+
+  /** Called from the sync poll so presence decays when a client goes away. */
+  public sendPresenceHeartbeat(): void {
+    if (!this.isLoggedInState) return;
+    api.sendPresenceHeartbeat().catch(() => {});
+  }
+
+  public async toggleChatMessageReaction(conversationId: string, messageId: string, emoji: string): Promise<boolean> {
+    const me = this.currentUser;
+    const msgs = this.chatMessages || [];
+    const idx = msgs.findIndex((m) => m.id === messageId);
+    if (idx >= 0) {
+      const existingReactions = msgs[idx].reactions || [];
+      const userReactionIndex = existingReactions.findIndex(
+        (r) => (r.user_id === me.id || r.userId === me.id) && r.emoji === emoji
+      );
+      let updatedReactions: ChatMessageReaction[];
+      if (userReactionIndex >= 0) {
+        updatedReactions = existingReactions.filter((_, i) => i !== userReactionIndex);
+      } else {
+        updatedReactions = [
+          ...existingReactions,
+          {
+            emoji,
+            user_id: me.id,
+            userId: me.id,
+            user_name: me.name,
+            userName: me.name,
+            created_at: new Date().toISOString(),
+          },
+        ];
+      }
+      msgs[idx] = { ...msgs[idx], reactions: updatedReactions };
+      this.saveLocalCacheSnapshot();
+      emitChange({ key: 'CHAT_MESSAGES', action: 'UPDATE', payload: msgs[idx] });
+    }
+    try {
+      await api.toggleChatMessageReaction(conversationId, messageId, emoji);
+      return true;
+    } catch (err) {
+      console.error('Failed to toggle reaction:', err);
+      return false;
+    }
   }
 
   public async attachDocumentToChatMessage(conversationId: string, messageId: string, documentId: string): Promise<boolean> {
@@ -2966,7 +3232,7 @@ class CentralStorageService {
     this.simPurchases.push(purchase);
     this.saveLocalCacheSnapshot();
     emitChange({ key: 'SIM_PURCHASES', action: 'CREATE', payload: purchase });
-    api.createSimPurchase(purchase.simId, purchase).catch((err) => console.error('Failed to sync sim purchase to server:', err));
+    api.createSimPurchase(purchase.simId, purchase).catch((err) => logSyncFailure('sim purchase to server:', err));
     this.logAudit({
       userId: this.currentUser?.id,
       userName: this.currentUser?.name,
@@ -2988,7 +3254,7 @@ class CentralStorageService {
     this.simPurchases[idx] = updated;
     this.saveLocalCacheSnapshot();
     emitChange({ key: 'SIM_PURCHASES', action: 'UPDATE', payload: updated });
-    api.updateSimPurchase(id, patch).catch((err) => console.error('Failed to sync sim purchase update to server:', err));
+    api.updateSimPurchase(id, patch).catch((err) => logSyncFailure('sim purchase update to server:', err));
     this.logAudit({
       userId: this.currentUser?.id,
       userName: this.currentUser?.name,
@@ -3044,7 +3310,7 @@ class CentralStorageService {
     this.saveLocalCacheSnapshot();
     emitChange({ key: 'SIM_PURCHASE_PAYMENTS', action: 'CREATE', payload: payment });
     emitChange({ key: 'SIM_PURCHASES', action: 'UPDATE', payload: purchase });
-    api.addPurchasePayment(payload.purchaseId, payment).catch((err) => console.error('Failed to sync purchase payment to server:', err));
+    api.addPurchasePayment(payload.purchaseId, payment).catch((err) => logSyncFailure('purchase payment to server:', err));
     this.logAudit({
       userId: this.currentUser?.id,
       userName: this.currentUser?.name,
@@ -3087,7 +3353,7 @@ class CentralStorageService {
     this.saveLocalCacheSnapshot();
     emitChange({ key: 'SIM_PURCHASE_RETURNS', action: 'CREATE', payload: purchReturn });
     emitChange({ key: 'SIM_PURCHASES', action: 'UPDATE', payload: purchase });
-    api.addPurchaseReturn(payload.purchaseId, purchReturn).catch((err) => console.error('Failed to sync purchase return to server:', err));
+    api.addPurchaseReturn(payload.purchaseId, purchReturn).catch((err) => logSyncFailure('purchase return to server:', err));
     this.logAudit({
       userId: this.currentUser?.id,
       userName: this.currentUser?.name,
@@ -3128,7 +3394,7 @@ class CentralStorageService {
     this.simSalePayments.push(payment);
     this.saveLocalCacheSnapshot();
     emitChange({ key: 'SIM_SALE_PAYMENTS', action: 'CREATE', payload: payment });
-    api.addSalePayment(payload.simId, payment).catch((err) => console.error('Failed to sync sale payment to server:', err));
+    api.addSalePayment(payload.simId, payment).catch((err) => logSyncFailure('sale payment to server:', err));
     const sim = this.findSimById(payload.simId);
     this.logAudit({
       userId: this.currentUser?.id,
@@ -3180,7 +3446,7 @@ class CentralStorageService {
     this.saveLocalCacheSnapshot();
     emitChange({ key: 'SIM_SALE_RETURNS', action: 'CREATE', payload: saleReturn });
     emitChange({ key: 'SIMS', action: 'UPDATE', payload: sim });
-    api.addSaleReturn(payload.simId, saleReturn).catch((err) => console.error('Failed to sync sale return to server:', err));
+    api.addSaleReturn(payload.simId, saleReturn).catch((err) => logSyncFailure('sale return to server:', err));
     this.logAudit({
       userId: this.currentUser?.id,
       userName: this.currentUser?.name,
@@ -3210,7 +3476,7 @@ class CentralStorageService {
     this.simCostItems.push(item);
     this.saveLocalCacheSnapshot();
     emitChange({ key: 'SIM_COST_ITEMS', action: 'CREATE', payload: item });
-    api.addCostItem(payload.simId, item).catch((err) => console.error('Failed to sync cost item to server:', err));
+    api.addCostItem(payload.simId, item).catch((err) => logSyncFailure('cost item to server:', err));
     return item;
   }
 
@@ -3434,7 +3700,7 @@ class CentralStorageService {
 
     this.saveLocalCacheSnapshot();
     emitChange({ key: 'CONSIGNMENTS', action: 'SAVE', payload: updated });
-    api.saveConsignment(updated).catch((err) => console.error('Failed to sync consignment to server:', err));
+    api.saveConsignment(updated).catch((err) => logSyncFailure('consignment to server:', err));
     return updated;
   }
 
@@ -3466,7 +3732,7 @@ class CentralStorageService {
     this.consignments = this.consignments.map((c) => (c.id === consignmentId ? updated : c));
     this.saveLocalCacheSnapshot();
     emitChange({ key: 'CONSIGNMENTS', action: 'UPDATE', payload: updated });
-    api.saveConsignment(updated).catch((err) => console.error('Failed to sync consignment to server:', err));
+    api.saveConsignment(updated).catch((err) => logSyncFailure('consignment to server:', err));
     return updated;
   }
 
@@ -3486,7 +3752,7 @@ class CentralStorageService {
     this.consignments = this.consignments.map((c) => (c.id === consignmentId ? updated : c));
     this.saveLocalCacheSnapshot();
     emitChange({ key: 'CONSIGNMENTS', action: 'UPDATE', payload: updated });
-    api.saveConsignment(updated).catch((err) => console.error('Failed to sync consignment to server:', err));
+    api.saveConsignment(updated).catch((err) => logSyncFailure('consignment to server:', err));
     return updated;
   }
 
@@ -3505,7 +3771,7 @@ class CentralStorageService {
     this.consignments = this.consignments.map((c) => (c.id === consignmentId ? updated : c));
     this.saveLocalCacheSnapshot();
     emitChange({ key: 'CONSIGNMENTS', action: 'UPDATE', payload: updated });
-    api.saveConsignment(updated).catch((err) => console.error('Failed to sync consignment to server:', err));
+    api.saveConsignment(updated).catch((err) => logSyncFailure('consignment to server:', err));
     return updated;
   }
 
@@ -3522,7 +3788,7 @@ class CentralStorageService {
     this.consignments = this.consignments.map((c) => (c.id === consignmentId ? updated : c));
     this.saveLocalCacheSnapshot();
     emitChange({ key: 'CONSIGNMENTS', action: 'UPDATE', payload: updated });
-    api.saveConsignment(updated).catch((err) => console.error('Failed to sync consignment to server:', err));
+    api.saveConsignment(updated).catch((err) => logSyncFailure('consignment to server:', err));
     return updated;
   }
 

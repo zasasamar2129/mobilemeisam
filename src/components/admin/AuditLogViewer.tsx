@@ -12,6 +12,7 @@ import { useToast } from '../ui/Toast';
 import { formatPersianDate } from '../../lib/dateUtils';
 import { useTranslation } from '../../lib/i18n';
 import { RTLNumber } from '../ui/RTLNumber';
+import { HorizontalScrollContainer } from '../ui/HorizontalScrollContainer';
 import { ListViewControls, usePersistentViewMode } from '../ui/ListViewControls';
 import { storage } from '../../services/storage';
 
@@ -247,7 +248,7 @@ export const AuditLogViewer: React.FC<AuditLogViewerProps> = ({
         </div>
       ) : viewMode === 'list' ? (
         /* ROW / LIST VIEW (TABLE) */
-        <div className="overflow-x-auto rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xs">
+        <HorizontalScrollContainer className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xs">
           <table className="w-full text-right text-xs">
             <thead className="bg-slate-100 dark:bg-slate-800/80 text-slate-700 dark:text-slate-300 font-bold border-b border-slate-200 dark:border-slate-700">
               <tr>
@@ -328,7 +329,7 @@ export const AuditLogViewer: React.FC<AuditLogViewerProps> = ({
               ))}
             </tbody>
           </table>
-        </div>
+        </HorizontalScrollContainer>
       ) : (
         /* CARD VIEW */
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">

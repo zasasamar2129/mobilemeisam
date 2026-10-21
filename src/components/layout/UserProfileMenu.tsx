@@ -16,6 +16,7 @@ import { useToast } from '../ui/Toast';
 import { isAdmin } from '../../lib/permissions';
 import { useTranslation } from '../../lib/i18n';
 import { formatPersianDate } from '../../lib/dateUtils';
+import { cleanDigits } from '../../lib/numberUtils';
 
 export interface UserProfileMenuProps {
   isOpen: boolean;
@@ -320,7 +321,7 @@ export const UserProfileMenu: React.FC<UserProfileMenuProps> = ({
               <Input
                 label={t('profile.mobile')}
                 value={mobile}
-                onChange={(e) => setMobile(e.target.value)}
+                onChange={(e) => setMobile(cleanDigits(e.target.value))}
                 rightIcon={<Phone className="w-4 h-4" />}
               />
             </div>

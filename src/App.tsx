@@ -2,13 +2,14 @@ import React, { useState, useEffect, useMemo, Suspense, lazy } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { ToastProvider, useToast } from './components/ui/Toast';
 import { Header } from './components/layout/Header';
+import { InstallPrompt } from './components/pwa/InstallPrompt';
 import { Sidebar } from './components/layout/Sidebar';
 import { storage, subscribeToStorage } from './services/storage';
 import { pushService } from './services/pushService';
 import {
   Customer, Call, Task, Payment, CheckItem, Contract, SimCard, RepairTicket, Attachment, User, AuditLog, VoiceNote, Lead, DocumentShare, Consignment, ChatConversation
 } from './types';
-import { isAdmin, canViewTask } from './lib/permissions';
+import { isAdmin, isGodOrAdmin, canViewTask } from './lib/permissions';
 import { I18nProvider, useTranslation } from './lib/i18n';
 
 // Modals - lazy loaded
@@ -49,6 +50,7 @@ const SettingsBackup = lazy(() => import('./components/admin/SettingsBackup').th
 const DocumentInbox = lazy(() => import('./components/inbox/DocumentInbox').then(m => ({ default: m.DocumentInbox })));
 const ConsignmentList = lazy(() => import('./components/consignment/ConsignmentList').then(m => ({ default: m.ConsignmentList })));
 const ChatApp = lazy(() => import('./components/chat/ChatApp').then(m => ({ default: m.ChatApp })));
+const WordpressCataloguePanel = lazy(() => import('./components/admin/WordpressCataloguePanel').then(m => ({ default: m.WordpressCataloguePanel })));
 
 // Preload all views during idle time so navigation feels instant (~sub-1s)
 if (typeof window !== 'undefined') {
@@ -192,7 +194,8 @@ const AppContent: React.FC = () => {
   }, []);
 
   // Customer selection helper
-  const handleSelectCustomer = (customerId: string) => {
+  const handleSelectCustomer = (customer: Customer | string) => {
+    const customerId = typeof customer === 'string' ? customer : customer.id;
     setSelectedCustomerId(customerId);
     setActiveTab('customers');
   };
@@ -245,24 +248,18 @@ const AppContent: React.FC = () => {
     setIsLoginModalOpen(false);
     setCurrentUser(user);
     refreshData();
-    // Auto request push notification permission as a direct result of the
-    // user's login interaction, per the push UX spec (not on page load).
-    if (typeof window !== 'undefined' && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window) {
-      // Only request if permission has not already been decided.
-      if (Notification.permission === 'default') {
-        setTimeout(() => {
-          pushService.initServiceWorker().then(() => {
-            pushService.subscribeUser(user.id, user.name).catch((err) => {
-              console.warn('[App] Auto push subscribe skipped:', err);
-            });
-          });
-        }, 1200);
-      }
-    }
+    // Ask for notification permission automatically, but only once per browser.
+    // iOS is skipped unless the app is installed to the home screen, since it
+    // rejects requestPermission() outside a real gesture. Users who dismissed are
+    // never re-asked; the explicit buttons in NotificationDrawer and
+    // NotificationSettingsManager remain available.
+    pushService.autoSubscribeIfPermitted(user.id, user.name);
   };
 
   return (
-    <div className="h-screen max-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col font-sans transition-colors overflow-hidden">
+    <div className="app-shell h-screen max-h-screen supports-[height:100dvh]:h-[100dvh] supports-[height:100dvh]:max-h-[100dvh] bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col font-sans transition-colors overflow-hidden">
+      {/* PWA install guidance — required before iOS can deliver push */}
+      <InstallPrompt />
       {/* Universal Top Header */}
       <Header
         currentUser={currentUser}
@@ -293,6 +290,13 @@ const AppContent: React.FC = () => {
           setIsPaymentModalOpen(true);
         }}
         onNavigate={setActiveTab}
+        onOpenSim={(simId) => {
+          const sim = (sims || []).find((s) => s.id === simId);
+          if (!sim) return;
+          setActiveTab('sims');
+          setSimToEdit(sim);
+          setIsSimModalOpen(true);
+        }}
         onToggleMobileNav={() => setIsMobileNavOpen((prev) => !prev)}
       />
 
@@ -527,6 +531,8 @@ const AppContent: React.FC = () => {
                 <TaskList
                   tasks={tasks}
                   customers={customers}
+                  users={users}
+                  allUsers={users}
                   currentUser={currentUser}
                   onAddNewTask={() => {
                     setTaskToEdit(null);
@@ -728,6 +734,20 @@ const AppContent: React.FC = () => {
                   currentUser={currentUser}
                 />
               )}
+
+              {/* WORDPRESS SYNC SETUP (GOD / SUPER_ADMIN ONLY) */}
+              {activeTab === 'wordpress-sync' && isGodOrAdmin(currentUser) && (
+                <SettingsBackup
+                  initialTab="wordpress"
+                  onFullReset={refreshData}
+                  currentUser={currentUser}
+                />
+              )}
+
+              {/* WORDPRESS CATALOGUE (ALL USERS) */}
+              {activeTab === 'wordpress-catalogue' && (
+                <WordpressCataloguePanel />
+              )}
               </Suspense>
             </motion.div>
           </AnimatePresence>
@@ -843,6 +863,7 @@ const AppContent: React.FC = () => {
         onClose={() => setIsSimModalOpen(false)}
         simToEdit={simToEdit}
         allCustomers={customers}
+        currentUser={currentUser}
         onSaved={() => {
           refreshData();
         }}

@@ -9,6 +9,11 @@ import { Attachment, Customer, User } from '../../types';
 import { storage } from '../../services/storage';
 import { useToast } from '../ui/Toast';
 import { Share2, Users, FileText, Send, Check, Sparkles } from 'lucide-react';
+import {
+  useCustomerCreationHandoff,
+  customerCreateOption,
+  CUSTOMER_CREATE_VALUE,
+} from '../customers/useCustomerCreationHandoff';
 
 export interface InternalDocumentShareModalProps {
   isOpen: boolean;
@@ -24,6 +29,7 @@ export const InternalDocumentShareModal: React.FC<InternalDocumentShareModalProp
   onShared,
 }) => {
   const { success, error, warning } = useToast();
+  const customerHandoff = useCustomerCreationHandoff();
   const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
   const [message, setMessage] = useState('');
   const [selectedCustomerId, setSelectedCustomerId] = useState<string>(document?.customerId || '');
@@ -88,6 +94,7 @@ export const InternalDocumentShareModal: React.FC<InternalDocumentShareModalProp
   };
 
   return (
+    <>
     <Modal
       isOpen={isOpen}
       onClose={onClose}
@@ -123,7 +130,13 @@ export const InternalDocumentShareModal: React.FC<InternalDocumentShareModalProp
           </label>
           <Select
             value={selectedCustomerId}
-            onChange={(e) => setSelectedCustomerId(e.target.value)}
+            onChange={(e) => {
+              if (e.target.value === CUSTOMER_CREATE_VALUE) {
+                customerHandoff.open((c) => setSelectedCustomerId(c.id));
+                return;
+              }
+              setSelectedCustomerId(e.target.value);
+            }}
           >
             <option value="">بدون اتصال به مشتری (سند درون‌سازمانی مستقل)</option>
             {allCustomers.map((c) => (
@@ -131,6 +144,7 @@ export const InternalDocumentShareModal: React.FC<InternalDocumentShareModalProp
                 {c.name} ({c.mobile})
               </option>
             ))}
+            <option value={CUSTOMER_CREATE_VALUE}>{customerCreateOption().label}</option>
           </Select>
           <p className="text-[11px] text-slate-500 mt-1">
             اسناد می‌توانند بدون اتصال به مشتری یا متصل به یک پرونده مشخص به اشتراک گذاشته شوند.
@@ -216,5 +230,7 @@ export const InternalDocumentShareModal: React.FC<InternalDocumentShareModalProp
         </div>
       </form>
     </Modal>
+    {customerHandoff.modal}
+    </>
   );
 };

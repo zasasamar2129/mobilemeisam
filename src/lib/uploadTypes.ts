@@ -15,8 +15,9 @@ export const MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024;
 
 /** Client-side extension whitelist (server re-validates independently — §8). */
 export const ALLOWED_UPLOAD_EXTENSIONS = [
-  'jpg', 'jpeg', 'png', 'webp', 'gif', 'heic', 'heif',
+  'jpg', 'jpeg', 'png', 'webp', 'gif', 'heic', 'heif', 'avif', 'bmp', 'tiff', 'tif', 'svg',
   'pdf', 'txt', 'doc', 'docx', 'xls', 'xlsx', 'csv', 'zip',
+  'mp3', 'mp4', 'm4a', 'ogg', 'webm', 'wav',
 ];
 
 /** Extension → MIME. Mobile browsers report wrong/empty types for HEIC/PNG, so the
@@ -24,6 +25,11 @@ export const ALLOWED_UPLOAD_EXTENSIONS = [
 export const EXTENSION_MIME: Record<string, string> = {
   heic: 'image/heic',
   heif: 'image/heif',
+  avif: 'image/avif',
+  bmp: 'image/bmp',
+  tiff: 'image/tiff',
+  tif: 'image/tiff',
+  svg: 'image/svg+xml',
   jpg: 'image/jpeg',
   jpeg: 'image/jpeg',
   png: 'image/png',
@@ -37,6 +43,12 @@ export const EXTENSION_MIME: Record<string, string> = {
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   csv: 'text/csv',
   zip: 'application/zip',
+  mp3: 'audio/mpeg',
+  mp4: 'audio/mp4',
+  m4a: 'audio/mp4',
+  ogg: 'audio/ogg',
+  webm: 'audio/webm',
+  wav: 'audio/wav',
 };
 
 export type UploadPhase =

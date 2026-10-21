@@ -24,12 +24,13 @@ import { hasPermission, isAdmin } from '../../lib/permissions';
 import { useTranslation } from '../../lib/i18n';
 import { BulkContactImportModal } from './BulkContactImportModal';
 import { GlobalPrintModal } from '../common/GlobalPrintModal';
+import { HorizontalScrollContainer } from '../ui/HorizontalScrollContainer';
 import { ListViewControls } from '../ui/ListViewControls';
 
 export interface CustomerListProps {
   customers: Customer[];
   currentUser?: User;
-  onSelectCustomer: (customer: Customer) => void;
+  onSelectCustomer?: (customer: Customer) => void;
   onAddNewCustomer: () => void;
   onEditCustomer?: (customer: Customer) => void;
   onRefreshCustomers?: () => void;
@@ -541,7 +542,7 @@ export const CustomerList: React.FC<CustomerListProps> = ({
         </div>
       ) : viewMode === 'table' ? (
         /* Table View */
-        <div className="overflow-x-auto rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm">
+        <HorizontalScrollContainer className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm">
           <table className="w-full text-right text-xs">
             <thead className="bg-slate-50 dark:bg-slate-800 text-slate-500 dark:text-slate-400 font-medium border-b border-slate-200 dark:border-slate-800">
               <tr>
@@ -674,7 +675,7 @@ export const CustomerList: React.FC<CustomerListProps> = ({
               })}
             </tbody>
           </table>
-        </div>
+        </HorizontalScrollContainer>
       ) : (
         /* Card View */
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">

@@ -17,6 +17,7 @@ import { exportPaymentsToExcel } from '../../lib/exportToExcel';
 import { formatToman } from '../../lib/currencyUtils';
 import { formatPersianDate, formatPersianDateTime, toPersianDigits } from '../../lib/dateUtils';
 import { useTranslation } from '../../lib/i18n';
+import { HorizontalScrollContainer } from '../ui/HorizontalScrollContainer';
 import { ListViewControls, usePersistentViewMode } from '../ui/ListViewControls';
 
 export interface PaymentListProps {
@@ -211,7 +212,7 @@ export const PaymentList: React.FC<PaymentListProps> = ({
         </div>
       ) : viewMode === 'list' ? (
         /* ROW / LIST VIEW (TABLE) */
-        <div className="overflow-x-auto rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xs">
+        <HorizontalScrollContainer className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xs">
           <table className="w-full text-right text-xs">
             <thead className="bg-slate-100 dark:bg-slate-800/80 text-slate-700 dark:text-slate-300 font-bold border-b border-slate-200 dark:border-slate-700">
               <tr>
@@ -306,7 +307,7 @@ export const PaymentList: React.FC<PaymentListProps> = ({
               })}
             </tbody>
           </table>
-        </div>
+        </HorizontalScrollContainer>
       ) : (
         /* CARD VIEW */
         <div className="space-y-3.5">

@@ -2,6 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { ChatConversation, User, ConversationType } from '../../types';
 import { useTranslation } from '../../lib/i18n';
 import { formatPersianDate } from '../../lib/dateUtils';
+import { storage } from '../../services/storage';
 import { Badge } from '../ui/Badge';
 import { Search, MessageSquarePlus, MessageCircle, Users, Pin, Megaphone, UserPlus } from 'lucide-react';
 
@@ -62,9 +63,25 @@ export const ChatConversationList: React.FC<ChatConversationListProps> = ({
       if (filterTab === 'GROUP' && c.type !== ConversationType.GROUP && c.type !== 'GROUP') return false;
       if (filterTab === 'PINNED' && !isPinned(c)) return false;
 
-      // Search query
       if (!q) return true;
-      return dirName(c).toLowerCase().includes(q) || (c.last_message || '').toLowerCase().includes(q);
+
+      // Title / display name, last message, and — for groups — any participant name.
+      // Members are matched from both the embedded snapshot and the users list so
+      // the search still resolves when a conversation was loaded before a user existed.
+      const haystack = [
+        dirName(c),
+        c.title || '',
+        c.last_message || '',
+        c.lastMessage || '',
+        ...(c.member_ids || []).map(
+          (id: string) => allUsers.find((u) => u.id === id)?.name || ''
+        ),
+        ...(c.members || []).map((m) => m.user_name || m.userName || ''),
+      ]
+        .join(' ')
+        .toLowerCase();
+
+      return haystack.includes(q);
     });
   }, [conversations, query, filterTab, currentUserId, allUsers]);
 
@@ -151,6 +168,14 @@ export const ChatConversationList: React.FC<ChatConversationListProps> = ({
             const active = c.id === activeConversationId;
             const isGrp = c.type === ConversationType.GROUP || c.type === 'GROUP';
             const pinned = isPinned(c);
+            // Presence: direct chats show the peer's dot, groups show an online count.
+            const peerId = isGrp
+              ? undefined
+              : (c.member_ids || []).find((id: string) => id !== currentUserId);
+            const peerOnline = peerId ? storage.isUserOnline(peerId) : false;
+            const onlineCount = isGrp
+              ? (c.member_ids || []).filter((id: string) => id !== currentUserId && storage.isUserOnline(id)).length
+              : 0;
 
             return (
               <div
@@ -183,10 +208,18 @@ export const ChatConversationList: React.FC<ChatConversationListProps> = ({
                       return dirName(c).charAt(0) || '?';
                     })()}
                   </div>
-                  {isGrp && (
-                    <span className="absolute -bottom-1 -end-1 w-3.5 h-3.5 rounded-full bg-emerald-500 ring-2 ring-white dark:ring-slate-900 flex items-center justify-center text-[8px] text-white">
-                      •
+                  {isGrp ? (
+                    <span className="absolute -bottom-1 -end-1 min-w-3.5 h-3.5 px-1 rounded-full bg-slate-400 dark:bg-slate-500 ring-2 ring-white dark:ring-slate-900 flex items-center justify-center text-[8px] font-bold text-white">
+                      {onlineCount > 0 ? onlineCount : ''}
                     </span>
+                  ) : (
+                    peerOnline && (
+                      <span
+                        className="absolute -bottom-0.5 -end-0.5 w-3 h-3 rounded-full bg-emerald-500 ring-2 ring-white dark:ring-slate-900"
+                        title={isRtl ? 'آنلاین' : 'Online'}
+                        aria-label={isRtl ? 'آنلاین' : 'Online'}
+                      />
+                    )
                   )}
                 </div>
 
